@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<!--
+  アプリ画面
+
+  【この画面は1枚だけ開けます】
+  2枚開けると、2つの画面が同じ作業状態を奪い合います(片方で開始、もう
+  片方で中止、片方で保存した設定をもう片方が古いまま表示)。**開くこと
+  自体をお断りします** ── 判定はサーバ(`app/screen.py`)と、この画面の
+  `static/js/app.js` の2段で行います。
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{APP_NAME}}</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body class="booting">
+
+<!-- 開けないとき・切れたときに、画面全体を覆う(操作させない) -->
+<div class="gate" id="gate" hidden>
+  <div class="gate-panel">
+    <div class="gate-mark" id="gate-mark">!</div>
+    <h2 id="gate-title">確認しています</h2>
+    <p id="gate-detail">この画面を使ってよいか、確認しています。</p>
+    <div class="gate-buttons">
+      <button class="primary" id="gate-retry">もう一度確認する</button>
+      <button id="gate-close">この画面を閉じる</button>
+    </div>
+    <p class="gate-note" id="gate-note"></p>
+  </div>
+</div>
+
+<header class="bar">
+  <div class="title">
+    <strong>{{APP_NAME}}</strong>
+    <span class="badge">{{VERSION}}</span>
+  </div>
+  <div class="bar-right">
+    <span class="conn" id="conn"><i></i><span id="conn-text">接続中</span></span>
+    <button id="quit" class="ghost">アプリを終了</button>
+  </div>
+</header>
+
+<main hidden id="main">
+
+  <!-- 設定部 ---------------------------------------------------- -->
+  <section class="card">
+    <div class="card-head">
+      <h2>設定</h2>
+      <p>どこを読んで、どこへ出すかを決めます。保存するとこの端末に残ります。</p>
+    </div>
+
+    <div class="fields">
+      <label class="field">
+        <span class="label">入力フォルダ</span>
+        <input type="text" id="input_dir" spellcheck="false"
+               placeholder="例: \\サーバ\共有\日報\2026.08">
+        <span class="hint" id="hint-input_dir"></span>
+      </label>
+
+      <label class="field">
+        <span class="label">出力先フォルダ<em>必須</em></span>
+        <input type="text" id="output_dir" spellcheck="false"
+               placeholder="例: D:\CSV出力">
+        <span class="hint" id="hint-output_dir"></span>
+      </label>
+
+      <label class="field">
+        <span class="label">ライン</span>
+        <input type="text" id="line" spellcheck="false" list="lines"
+               placeholder="空ならシートの呼び名から当てます(機側 → LS)">
+        <datalist id="lines">
+          <option value="LS"></option><option value="HVC"></option>
+        </datalist>
+        <span class="hint">当たらなかったときだけ指定してください。</span>
+      </label>
+
+      <label class="field">
+        <span class="label">参照用マスタの置き場所</span>
+        <input type="text" id="ref_dir" spellcheck="false"
+               placeholder="伝送用ファイル.sqlite3 が入っているフォルダ">
+        <span class="hint" id="hint-ref_dir"></span>
+      </label>
+    </div>
+
+    <div class="row">
+      <button class="primary" id="save">設定を保存</button>
+      <button id="open-out">出力先を開く</button>
+      <button id="open-logs">ログを開く</button>
+      <span class="msg" id="settings-msg"></span>
+    </div>
+  </section>
+
+  <!-- 入力 ------------------------------------------------------- -->
+  <section class="card">
+    <div class="card-head">
+      <h2>読ませるブック</h2>
+      <p>ドラッグで放り込むか、上の入力フォルダをそのまま読みます。
+         一度に <b id="limit-text">100</b> 本まで。</p>
+    </div>
+
+    <div class="choices">
+      <label><input type="radio" name="source" value="intake" checked>
+        ドラッグで放り込む</label>
+      <label><input type="radio" name="source" value="folder">
+        入力フォルダをそのまま読む</label>
+    </div>
+
+    <div class="drop" id="drop" tabindex="0">
+      <div class="drop-inner">
+        <div class="drop-mark">＋</div>
+        <div><b>ここへドラッグ</b></div>
+        <div class="drop-sub">.xlsx / .xlsm ── フォルダごと放り込めます。
+          クリックで選ぶこともできます。</div>
+      </div>
+      <input type="file" id="picker" multiple accept=".xlsx,.xlsm" hidden>
+    </div>
+
+    <div class="row">
+      <span class="count" id="intake-count">0 / 100 本</span>
+      <button id="intake-clear" class="ghost">受け取ったぶんを消す</button>
+      <span class="msg" id="intake-msg"></span>
+    </div>
+    <div class="chips" id="intake-list"></div>
+
+    <div class="folder-line" id="folder-line" hidden>
+      <button id="scan">入力フォルダを数える</button>
+      <span class="msg" id="scan-msg"></span>
+    </div>
+  </section>
+
+  <!-- 実行 ------------------------------------------------------- -->
+  <section class="card">
+    <div class="card-head">
+      <h2>変換</h2>
+      <p>1日・1ラインごとに4本のCSVと、列の説明を書きます。
+         <b>ブラウザへダウンロードはしません</b> ── 出力先フォルダへ直接書きます。</p>
+    </div>
+
+    <div class="row">
+      <button class="primary big" id="start">変換開始</button>
+      <button id="cancel" class="danger" hidden>中止</button>
+      <label class="check"><input type="checkbox" id="dry_run">
+        確かめるだけ(CSVを書きません)</label>
+    </div>
+
+    <div class="progress" id="progress" hidden>
+      <div class="progress-head">
+        <span id="progress-phase">読み取り</span>
+        <span id="progress-count">0 / 0 本</span>
+      </div>
+      <div class="track"><div class="fill" id="progress-fill"></div></div>
+      <div class="progress-foot">
+        <span id="progress-current"></span>
+        <span id="progress-time"></span>
+      </div>
+    </div>
+
+    <div class="notice" id="job-msg" hidden></div>
+  </section>
+
+  <!-- 結果 ------------------------------------------------------- -->
+  <section class="card" id="result-card" hidden>
+    <div class="card-head">
+      <h2>結果</h2>
+      <p>○ 読めて数も合った ／ ! 読めたが数が合わない(座標がずれている
+         おそれがあります) ／ × 読めなかった</p>
+    </div>
+
+    <div class="tiles" id="tiles"></div>
+    <div class="table-wrap">
+      <table id="result">
+        <thead><tr>
+          <th></th><th>ファイル</th><th>日付</th><th>ライン</th>
+          <th class="num">ページ</th><th class="num">行</th><th>突き合わせ</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <button class="link" id="diag-toggle">診断情報</button>
+    <pre id="diag" hidden></pre>
+  </footer>
+</main>
+
+<script>window.BOOT = {{BOOT}};</script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

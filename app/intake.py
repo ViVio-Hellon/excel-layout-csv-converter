@@ -1,0 +1,125 @@
+r"""ドラッグで受け取ったブックの置き場所
+
+【なぜ一度こちらへ置くのか】
+ブラウザは、放り込まれたファイルの**本当の場所(フルパス)を教えません**。
+安全のための決まりで、社内アプリでも変えられません。渡されるのは中身だけ
+です。そのため、受け取った中身をこの端末のローカル領域へ書き出してから、
+フォルダを指定したときとまったく同じ道で読みます。
+
+    ドラッグ → %LOCALAPPDATA%\…\work\intake\ へ写す → converter.run が読む
+
+**出したCSVをダウンロードさせることはありません。** 出力先は設定部で
+指定したフォルダで、書くのはこの端末のPythonです ── ブラウザの
+ダウンロードフォルダに散らばると、どれが最新か分からなくなります。
+
+【置いたものは残しません】
+受け取ったブックは一時のものなので `work` に置きます(基盤仕様書 4.6)。
+次に受け取るとき、起動したとき、そして片づけを頼まれたときに消します。
+"""
+from __future__ import annotations
+
+import logging
+import re
+import shutil
+import threading
+import unicodedata
+from pathlib import Path
+
+from . import appinfo
+
+log = logging.getLogger("xlcsv.app")
+
+#: 読める拡張子。`converter.run.SUFFIXES` と同じもの
+SUFFIXES = (".xlsx", ".xlsm")
+
+#: ファイル名から落とす字。**区切り文字は落とします** ── 受け取った名前で
+#: 上の階層へ書かれないようにするため
+_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def folder() -> Path:
+    return appinfo.local_dir("work") / "intake"
+
+
+def safe_name(name: str) -> str:
+    """渡された名前を、この端末で使える形にする。
+
+    フォルダ区切りは**名前の一部として渡ってくることがある**ので
+    (フォルダごと放り込んだ場合)、最後の1つだけを採ります。
+    """
+    text = unicodedata.normalize("NFC", (name or "").strip())
+    text = text.replace("\\", "/").split("/")[-1]
+    text = _BAD.sub("_", text).lstrip(".")
+    return text[:120] or "無題.xlsx"
+
+
+class Intake:
+    """放り込まれたぶんを1組として持つ。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._names: list[str] = []
+
+    # -- 受け取る ----------------------------------------------------
+    def begin(self) -> Path:
+        """新しく受け取り始める。**前の組は消します**(混ざらないように)。"""
+        self.clear()
+        target = folder()
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def add(self, name: str, data: bytes) -> str:
+        """1本受け取る。**上限と拡張子と大きさはここで断ります。**"""
+        clean = safe_name(name)
+        if Path(clean).suffix.lower() not in SUFFIXES:
+            raise ValueError(f"{clean}: 読めるのは .xlsx と .xlsm です")
+        if clean.startswith("~$"):
+            raise ValueError(f"{clean}: Excelが開いている間の作業ファイルです")
+        limit = appinfo.max_files()
+        with self._lock:
+            if len(self._names) >= limit:
+                raise ValueError(f"一度に受けられるのは {limit} 本までです")
+            if len(data) > appinfo.max_file_bytes():
+                raise ValueError(
+                    f"{clean}: 大きすぎます"
+                    f"(上限 {appinfo.max_file_bytes() // 1024 // 1024}MB)")
+            target = folder()
+            target.mkdir(parents=True, exist_ok=True)
+            path = target / clean
+            stem, suffix = path.stem, path.suffix
+            index = 1
+            while path.exists():                  # 同じ名前が2つ来ることがある
+                path = target / f"{stem}({index}){suffix}"
+                index += 1
+            path.write_bytes(data)
+            self._names.append(path.name)
+            return path.name
+
+    # -- 問い合わせ --------------------------------------------------
+    def files(self) -> list[Path]:
+        """受け取った順ではなく**名前順**。フォルダ指定と同じ並びにします。"""
+        with self._lock:
+            target = folder()
+            return sorted((target / n for n in self._names if (target / n).exists()),
+                          key=lambda p: p.name)
+
+    def names(self) -> list[str]:
+        return [p.name for p in self.files()]
+
+    def count(self) -> int:
+        return len(self.files())
+
+    # -- 片づけ ------------------------------------------------------
+    def clear(self) -> None:
+        with self._lock:
+            self._names = []
+        try:
+            shutil.rmtree(folder())
+        except FileNotFoundError:
+            pass
+        except OSError as exc:                    # noqa: BLE001 - 続けてよい
+            log.warning("受け取り置き場を消せませんでした: %s", exc)
+
+
+#: アプリで1つ
+INTAKE = Intake()
