@@ -1,0 +1,23 @@
+# **実物のブックとCSVは絶対に入れない。**
+#
+# 作業者名・納入先(取引先)の実名が入っています。テストは合成した
+# ブックを自分で組み立てます(`tests/_fixture.py`)ので、実物は要りません。
+*.xlsx
+*.xlsm
+*.xls
+*.csv
+out/
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# 作業中のもの
+*.sqlite3
+*.log
+.DS_Store

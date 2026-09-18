@@ -1,0 +1,272 @@
+"""変換器 ── 読めること・数が合うこと・同じCSVが出ること
+
+【実物は置いていません】
+作業者名も納入先も実名なので、リポジトリには入れられません。かわりに
+**同じ座標へ同じ形の値を置いたブック**を組み立てて試します
+(`tests/_fixture.py`)。
+
+実物との突き合わせは別にやっています ── 実機の13本(コイル7 / 板6)で、
+シート自身の合計と**9項目すべて一致**、日報管理ツール本体の出力と
+**48本すべてバイト一致**でした(README「確かめたこと」)。
+"""
+from __future__ import annotations
+
+import logging
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "vendor"))
+
+# **参照用マスタはテストに要りません。** 読めない warning がファイルの数だけ
+# 出て、本当に見たい失敗が埋もれるので黙らせます(本番は `convert.py` が
+# 1行だけ出します)
+logging.getLogger("nippou").setLevel(logging.CRITICAL)
+
+from converter import check, run                 # noqa: E402
+from tests._fixture import day_sheet, write_xlsx  # noqa: E402
+
+
+class GatherTests(unittest.TestCase):
+    """読む相手の集め方。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_フォルダごと拾う(self) -> None:
+        for n in range(3):
+            write_xlsx(self.tmp / f"{n}.xlsx", day_sheet())
+        self.assertEqual(len(run.gather([self.tmp])), 3)
+
+    def test_名前順に並ぶ(self) -> None:
+        """**入れる順で結果が変わらないように。**"""
+        for name in ("c.xlsx", "a.xlsx", "b.xlsx"):
+            write_xlsx(self.tmp / name, day_sheet())
+        found = [p.name for p in run.gather([self.tmp])]
+        self.assertEqual(found, ["a.xlsx", "b.xlsx", "c.xlsx"])
+
+    def test_xlsx以外は拾わない(self) -> None:
+        write_xlsx(self.tmp / "a.xlsx", day_sheet())
+        (self.tmp / "メモ.txt").write_text("x", encoding="utf-8")
+        (self.tmp / "古い.xls").write_text("x", encoding="utf-8")
+        self.assertEqual([p.name for p in run.gather([self.tmp])], ["a.xlsx"])
+
+    def test_エクセルの一時ファイルは拾わない(self) -> None:
+        """**`~$` は開きっぱなしの目印**で、中身はブックではありません。"""
+        write_xlsx(self.tmp / "a.xlsx", day_sheet())
+        (self.tmp / "~$a.xlsx").write_text("x", encoding="utf-8")
+        self.assertEqual([p.name for p in run.gather([self.tmp])], ["a.xlsx"])
+
+    def test_ファイルを直に渡せる(self) -> None:
+        one = write_xlsx(self.tmp / "a.xlsx", day_sheet())
+        self.assertEqual(run.gather([one]), [one])
+
+
+class ConvertTests(unittest.TestCase):
+    """変換そのもの。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.out = self.tmp / "out"
+
+    def book(self, name="a.xlsx", **kw) -> Path:
+        return write_xlsx(self.tmp / name, day_sheet(**kw))
+
+    def test_読めてCSVが出る(self) -> None:
+        self.book()
+        found = run.convert([self.tmp], self.out, line="HVC")
+        self.assertEqual(len(found.read_ok), 1)
+        # 集計 / 集計明細 / 停止内訳 / 計算内容 の4本
+        self.assertEqual(len(found.written), 4)
+        self.assertTrue(all(p.exists() for p in found.written))
+
+    def test_3直ぶん読む(self) -> None:
+        self.book()
+        found = run.convert([self.tmp], self.out, line="HVC")
+        one = found.files[0]
+        self.assertEqual(one.report_date, "2026年8月26日")
+        self.assertEqual(one.pages, 3)       # 1直2行 + 2直1行 + 3直1行
+        self.assertEqual(one.rows, 4)
+
+    def test_シートの呼び名からラインを当てる(self) -> None:
+        self.book()
+        found = run.convert([self.tmp], self.out)   # --line を渡さない
+        self.assertEqual(found.files[0].line, "HVC")
+
+    def test_ラインが決まらなければ断る(self) -> None:
+        """**黙って当てずっぽうで入れません。**"""
+        write_xlsx(self.tmp / "a.xlsx", day_sheet(line_text="知らない名前"))
+        found = run.convert([self.tmp], self.out)
+        self.assertFalse(found.files[0].ok)
+        self.assertIn("ラインが決まりません", found.files[0].error)
+
+    def test_指定したラインが優先される(self) -> None:
+        self.book()
+        found = run.convert([self.tmp], self.out, line="LS")
+        self.assertEqual(found.files[0].line, "LS")
+
+    def test_1本読めなくても残りは続く(self) -> None:
+        """**1本のせいで全部が止まると、何百本のときに困ります。**"""
+        self.book("a.xlsx")
+        (self.tmp / "b.xlsx").write_bytes("xlsx ではありません".encode("utf-8"))
+        self.book("c.xlsx")
+        found = run.convert([self.tmp], self.out, line="HVC")
+        self.assertEqual(len(found.files), 3)
+        self.assertEqual(len(found.read_ok), 2)
+
+    def test_確かめるだけなら1本も書かない(self) -> None:
+        self.book()
+        found = run.convert([self.tmp], self.out, line="HVC", dry_run=True)
+        self.assertEqual(len(found.read_ok), 1)
+        self.assertEqual(found.written, [])
+        self.assertFalse(self.out.exists())
+
+    def test_DBを残さない(self) -> None:
+        """**使い捨て。** 変換のあとにDBが残っていたら、次の変換に混ざります。"""
+        self.book()
+        run.convert([self.tmp], self.out, line="HVC")
+        self.assertEqual(list(self.out.rglob("*.sqlite3")), [])
+
+    def test_コイルでも板でも読める(self) -> None:
+        """**座標は同じ。** 使う欄が違うだけです(`docs/座標表.md`)。"""
+        for coil in (True, False):
+            with self.subTest(coil=coil):
+                tmp = Path(tempfile.mkdtemp(dir=self.tmp))
+                write_xlsx(tmp / "a.xlsx", day_sheet(coil=coil))
+                found = run.convert([tmp], self.out / str(coil), line="HVC")
+                self.assertTrue(found.files[0].ok)
+                self.assertTrue(found.files[0].verify.ok)
+
+
+class VerifyTests(unittest.TestCase):
+    """検算 ── **座標が合っていたかを、シート自身の合計で確かめる。**"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def run_one(self, **kw):
+        write_xlsx(self.tmp / "a.xlsx", day_sheet(**kw))
+        found = run.convert([self.tmp], self.tmp / "out", line="HVC",
+                            dry_run=True)
+        return found.files[0]
+
+    def test_合っていれば通る(self) -> None:
+        one = self.run_one()
+        self.assertTrue(one.verify.ok, one.verify.summary())
+        self.assertIn("すべて一致", one.verify.summary())
+
+    def test_合わなければ名指しする(self) -> None:
+        """**黙って通しません。** 座標がずれても数は出てしまいます。"""
+        one = self.run_one(stops_ok=False)
+        self.assertFalse(one.verify.ok)
+        self.assertTrue(one.verify.bad)
+        self.assertIn("停止", one.verify.summary())
+
+    def test_直ごとに見る(self) -> None:
+        """どの直がずれたかまで分かるように。"""
+        one = self.run_one()
+        what = [line.what for line in one.verify.lines]
+        for shift in ("1直", "2直", "3直"):
+            self.assertIn(f"{shift} 枚数", what)
+            self.assertIn(f"{shift} 重量", what)
+        self.assertIn("日計 枚数", what)
+        self.assertIn("停止 合計(分)", what)
+
+
+class CheckLogicTests(unittest.TestCase):
+    """突き合わせの決まり(`converter/check.py`)。**純粋な部分。**"""
+
+    def test_許しの幅(self) -> None:
+        """重量は小数第1位まで持つので、丸めのぶんは許します。"""
+        self.assertTrue(check.Line("重量", 1000.04, 1000.0,
+                                   check.WEIGHT_TOLERANCE).ok)
+        self.assertFalse(check.Line("重量", 1000.5, 1000.0,
+                                    check.WEIGHT_TOLERANCE).ok)
+
+    def test_差を書く(self) -> None:
+        line = check.Line("1直 枚数", 78, 80)
+        self.assertIn("78", line.text())
+        self.assertIn("80", line.text())
+        self.assertIn("-2", line.text())
+
+    def test_合計が無ければ丸にしない(self) -> None:
+        """**確かめていないことを、確かめたことにしない。**"""
+        report = check.build("x", read_by_shift={"1直": (5.0, 100.0)},
+                             read_stops=0.0, sheet_by_shift={},
+                             sheet_day=(0.0, 0.0), sheet_stops={})
+        self.assertTrue(report.no_totals)
+        self.assertFalse(report.ok)
+        self.assertIn("突き合わせられません", report.summary())
+
+    def test_読めない字は0として扱う(self) -> None:
+        self.assertEqual(check.to_number("あ"), 0.0)
+        self.assertEqual(check.to_number(None), 0.0)
+        self.assertEqual(check.to_number(" 12.5 "), 12.5)
+
+
+class CommandTests(unittest.TestCase):
+    """コマンドとして動くか。**追加ライブラリ無しで。**"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def call(self, *args):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "convert.py"), *args],
+            capture_output=True, text=True)
+
+    def test_走ってCSVが出る(self) -> None:
+        write_xlsx(self.tmp / "a.xlsx", day_sheet())
+        done = self.call(str(self.tmp), "--out", str(self.tmp / "out"))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("書いたCSV", done.stdout)
+        self.assertTrue(list((self.tmp / "out").rglob("*.csv")))
+
+    def test_読む相手が無ければ断る(self) -> None:
+        done = self.call(str(self.tmp), "--out", str(self.tmp / "out"))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("見つかりません", done.stderr)
+
+    def test_数が合わなければ2で返る(self) -> None:
+        """**押し黙って0を返さない。** 続きの処理が気づけるように。"""
+        write_xlsx(self.tmp / "a.xlsx", day_sheet(stops_ok=False))
+        done = self.call(str(self.tmp), "--out", str(self.tmp / "out"))
+        self.assertEqual(done.returncode, 2, done.stdout)
+        self.assertIn("数が合わない", done.stdout)
+
+    def test_読めなければ1で返る(self) -> None:
+        (self.tmp / "a.xlsx").write_bytes("xlsx ではありません".encode("utf-8"))
+        done = self.call(str(self.tmp), "--out", str(self.tmp / "out"))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("読めなかった", done.stdout)
+
+
+class NoExtraLibraryTests(unittest.TestCase):
+    """**追加ライブラリを増やさない。** 現場のPCへ配るものなので。"""
+
+    def test_取り込んでいない(self) -> None:
+        import re
+
+        pattern = re.compile(r"^\s*(?:import|from)\s+(\w+)", re.M)
+        names = set()
+        for source in ROOT.rglob("*.py"):
+            names.update(pattern.findall(source.read_text(encoding="utf-8")))
+        for banned in ("openpyxl", "xlrd", "pandas", "numpy", "flask"):
+            self.assertNotIn(banned, names, f"{banned} が入っている")
+
+
+if __name__ == "__main__":
+    unittest.main()
