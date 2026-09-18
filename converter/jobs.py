@@ -20,7 +20,6 @@
 """
 from __future__ import annotations
 
-import logging
 import sys
 import threading
 import time
@@ -29,12 +28,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from . import appinfo, settings_store
+from . import app_config, user_settings
+from .logging_utils import get_logger
 
-log = logging.getLogger("xlcsv.app")
+log = get_logger("jobs")
 
 # 写してある日報管理ツールを読めるようにする。**同じコードを通すため**
-_VENDOR = str(appinfo.APP_ROOT / "vendor")
+_VENDOR = str(app_config.APP_ROOT / "vendor")
 if _VENDOR not in sys.path:
     sys.path.insert(0, _VENDOR)
 
@@ -187,8 +187,8 @@ def master_notice() -> tuple[bool, str]:
 
 def gather(folder: str) -> list[Path]:
     """フォルダから読む相手を集める。**CLIと同じ集めかた**(名前順)。"""
-    from converter import run
-    return run.gather([settings_store.resolve(folder)])
+    from . import run
+    return run.gather([user_settings.resolve(folder)])
 
 
 class Runner:
@@ -211,26 +211,26 @@ class Runner:
             return self.job.snapshot()
 
     # -- 操作 --------------------------------------------------------
-    def start(self, books: list[Path], settings: settings_store.Settings, *,
+    def start(self, books: list[Path], settings: user_settings.Settings, *,
               dry_run: bool = False) -> dict:
         with self._lock:
             if self.job.state == RUNNING:
                 raise RuntimeError("すでに変換中です")
             if not books:
                 raise ValueError("読む相手がありません(.xlsx / .xlsm)")
-            limit = appinfo.max_files()
+            limit = app_config.max_files()
             if len(books) > limit:
                 raise ValueError(
                     f"一度に読めるのは {limit} 本までです(いまは {len(books)} 本)。"
                     "分けて実行してください")
-            out_dir = "" if dry_run else str(settings_store.ensure_output(settings))
+            out_dir = "" if dry_run else str(user_settings.ensure_output(settings))
             self._cancel.clear()
             self.job = Job(id=uuid.uuid4().hex[:12], state=RUNNING,
                            phase=PHASE_READ, total=len(books),
                            dry_run=dry_run, out_dir=out_dir,
                            line=settings.line, started_at=time.time())
             job = self.job
-        settings_store.apply_to_vendor(settings)
+        user_settings.apply_to_vendor(settings)
         job.master_ok, job.master_notice = master_notice()
         log.info("変換開始 id=%s %d本 line=%r dry_run=%s → %s",
                  job.id, job.total, settings.line, dry_run, out_dir or "(書きません)")
@@ -251,9 +251,9 @@ class Runner:
         return True
 
     # -- 中身 --------------------------------------------------------
-    def _run(self, books: list[Path], settings: settings_store.Settings,
+    def _run(self, books: list[Path], settings: user_settings.Settings,
              dry_run: bool, job: Job) -> None:
-        from converter import run
+        from . import run
 
         def on_file(one, index, total):
             if self._cancel.is_set():

@@ -1,57 +1,65 @@
+' ===================================================================
+'  エクセル → CSV 変換器 起動
+'
+'  **この1つだけがダブルクリックする入り口です。**
+'  コンソールを出さずに起動するので、画面はブラウザだけになります。
+'  起動しないときは start.bat を使うと原因が表示されます。
+'  (基盤仕様書 2.1「利用者向けの通常起動ファイルは1つに絞る」)
+'
+'  --- keep this file in CP932 (Shift-JIS) with CRLF line endings ---
+'  WSH reads a .vbs with the system ANSI code page, which is 932 on the
+'  Japanese Windows this tool runs on. tests/test_launch_files.py checks it.
+' ===================================================================
 Option Explicit
-' ===================================================================
-'  通常起動の入口(基盤仕様書 2.1)
-'
-'  利用者が実行するのは**このファイル1つ**です。コンソールを出さずに
-'  Python を起動し、あとは待機画面(loading.html)が引き受けます。
-'
-'  起動しないときは start.bat(診断用)を使ってください。どちらも最後は
-'  同じ start_app.py を呼びます ── 通常起動と原因調査用起動を分けるのが
-'  目的で、別の道を作るのが目的ではありません。
-'
-'  このファイルは日本語を含むので **ANSI(Shift_JIS)** で保存します。
-'  UTF-8 で保存すると wscript が読めません。
-' ===================================================================
-Dim shell, fso, here, script, candidates, i, launched
 
+Const APP_NAME = "エクセル → CSV 変換器"
+
+Dim shell, fso, here, script, cmd
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
-
 here = fso.GetParentFolderName(WScript.ScriptFullName)
-script = here & "\start_app.py"
+script = fso.BuildPath(here, "start_app.py")
 
+' 本体が同じフォルダにあるか。**pythonw はコンソールを持たない**ので、
+' 無いまま起動すると本当に「何も起きない」。ここで気づけるようにする
+' (このファイルだけをデスクトップにコピーすると、この状態になる)
 If Not fso.FileExists(script) Then
-    MsgBox "start_app.py が見つかりません。" & vbCrLf & vbCrLf & script & vbCrLf & vbCrLf & _
-           "フォルダごとコピーできているか確かめてください。", _
-           vbCritical, "起動できません"
+    MsgBox "start_app.py が見つかりません。" & vbCrLf & vbCrLf & _
+           "探した場所: " & script & vbCrLf & vbCrLf & _
+           "このファイルは、アプリ一式が入ったフォルダの中から" & vbCrLf & _
+           "実行してください(ショートカットを作るのは大丈夫です)。", _
+           vbCritical, APP_NAME
     WScript.Quit 1
 End If
 
+' Python があるかを先に確かめる。無いまま起動すると、
+' コンソールが出ないぶん「何も起きない」ように見えてしまう
+If shell.Run("cmd /c python --version", 0, True) <> 0 Then
+    MsgBox "Python が見つかりません。" & vbCrLf & vbCrLf & _
+           "https://www.python.org/downloads/ からインストールし、" & vbCrLf & _
+           "インストーラの最初の画面で「Add python.exe to PATH」に" & vbCrLf & _
+           "チェックを入れてください。" & vbCrLf & vbCrLf & _
+           "詳しい原因を見るには start.bat を実行してください。", _
+           vbCritical, APP_NAME
+    WScript.Quit 1
+End If
+
+' 実際に使うのは pythonw のほう。python はあるのに pythonw が無い入れ方も
+' あるので、走らせる前に確かめる(ここを飛ばすと無言で失敗する)
+If shell.Run("cmd /c pythonw --version", 0, True) <> 0 Then
+    MsgBox "pythonw が見つかりません。" & vbCrLf & vbCrLf & _
+           "Python は入っていますが、画面を出さずに起動するための" & vbCrLf & _
+           "pythonw.exe がありません。" & vbCrLf & _
+           "start.bat から起動してください(コンソールが開きます)。", _
+           vbCritical, APP_NAME
+    WScript.Quit 1
+End If
+
+' pythonw はコンソールを出さない。起動後もサーバが動き続けるので
+' 待たずに抜ける(False)。**ここでは起動を待ちません** ── 待機画面が
+' 起動確認APIの応答を見て切り替えるので、この入口の仕事は呼ぶことまで。
+' パスは**絶対パスで渡す**。共有フォルダから実行されることがあり、
+' 作業フォルダに頼ると見つけられないことがある
 shell.CurrentDirectory = here
-
-' pythonw を先に試します(コンソールを出さないため)。
-' 見つからない端末のために py ランチャーと python も控えにしています。
-candidates = Array("pythonw.exe", "pyw.exe -3", "python.exe", "py.exe -3")
-launched = False
-
-For i = 0 To UBound(candidates)
-    If Not launched Then
-        On Error Resume Next
-        shell.Run candidates(i) & " """ & script & """", 0, False
-        If Err.Number = 0 Then launched = True
-        Err.Clear
-        On Error GoTo 0
-    End If
-Next
-
-If Not launched Then
-    MsgBox "Python が見つかりませんでした。" & vbCrLf & vbCrLf & _
-           "Python 3.11 以上を入れるか、PATH に通してください。" & vbCrLf & _
-           "入っているはずなのに出る場合は start.bat を実行すると、" & vbCrLf & _
-           "コンソールに理由が出ます。", _
-           vbCritical, "起動できません"
-    WScript.Quit 1
-End If
-
-' **ここでは起動を待ちません。** 待機画面が起動確認APIの応答を見て
-' 切り替えるので、この入口の仕事は「呼ぶこと」までです。
+cmd = "pythonw " & Chr(34) & script & Chr(34)
+shell.Run cmd, 0, False

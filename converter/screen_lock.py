@@ -32,7 +32,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from . import appinfo
+from . import app_config
+
+#: 画面が自分の番号を入れて送るヘッダ。**名前の出どころはここ1つ**
+HEADER = "X-Screen-Id"
 
 
 @dataclass
@@ -40,7 +43,7 @@ class Holder:
     """いま使っている画面。"""
 
     tab_id: str
-    token: str
+    screen_id: str
     load_id: str = ""
     agent: str = ""
     since: float = field(default_factory=time.time)
@@ -58,7 +61,7 @@ class Claim:
     """占有を求めた結果。断るときは**理由を必ず添えます。**"""
 
     ok: bool
-    token: str = ""
+    screen_id: str = ""
     reason: str = ""
     detail: str = ""
     retry_after: int = 0
@@ -75,7 +78,7 @@ class ScreenLock:
     def timeout(self) -> int:
         if self._timeout is not None:
             return self._timeout
-        return appinfo.screen_timeout_seconds()
+        return app_config.screen_timeout_seconds()
 
     def _current(self) -> Optional[Holder]:
         """**呼ぶたびに期限切れを片づけます。** 掃除役を別に持たないため。"""
@@ -102,33 +105,33 @@ class ScreenLock:
                             "2枚開くと、どちらの操作が効いているのか"
                             "分からなくなるため、開くことをお断りしています。"),
                     retry_after=self.timeout)
-            token = secrets.token_urlsafe(16)
-            self._holder = Holder(tab_id=tab_id, token=token, load_id=load_id,
+            screen_id = secrets.token_urlsafe(16)
+            self._holder = Holder(tab_id=tab_id, screen_id=screen_id, load_id=load_id,
                                   agent=agent[:120],
                                   since=holder.since if holder else time.time())
-            return Claim(True, token=token)
+            return Claim(True, screen_id=screen_id)
 
-    def beat(self, token: str) -> bool:
+    def beat(self, screen_id: str) -> bool:
         """生存確認。**持ち主でなければ偽**(画面は無効表示へ切り替えます)。"""
         with self._lock:
             holder = self._current()
-            if not holder or holder.token != token:
+            if not holder or holder.screen_id != screen_id:
                 return False
             holder.last_seen = time.time()
             return True
 
-    def release(self, token: str) -> bool:
+    def release(self, screen_id: str) -> bool:
         with self._lock:
             holder = self._current()
-            if holder and holder.token == token:
+            if holder and holder.screen_id == screen_id:
                 self._holder = None
                 return True
             return False
 
-    def holds(self, token: str) -> bool:
+    def holds(self, screen_id: str) -> bool:
         with self._lock:
             holder = self._current()
-            return bool(holder and token and holder.token == token)
+            return bool(holder and screen_id and holder.screen_id == screen_id)
 
     def busy(self) -> bool:
         with self._lock:

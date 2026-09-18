@@ -1,24 +1,36 @@
-r"""起動の開始点(基盤仕様書 2.1 / 2.2 / 2.4 / 2.5)
+#!/usr/bin/env python3
+r"""Python側の起動開始点(基盤仕様書 2.5)
 
-アプリ本体を読む前に、実行環境を整えて、起動してよいかを決めます。
+アプリ本体を読む前に実行環境を整え、多重起動を判定し、待ち受けを立てて
+ブラウザを開きます。**業務機能はここに書きません。**
 
-    1. 実行環境を確認中   Python の版・アプリの置き場所・設定・ローカル領域
-    2. アプリを準備中     多重起動の判定 → 待機画面 → 待ち受け開始 → 読込
-    3. 接続を確認中       待機画面が起動確認APIの応答を見る
-    4. 起動完了           画面へ切り替わる
+    Start.vbs(通常) / start.bat(診断)
+        └─ start_app.py            ← ここ
+             ├─ 実行環境の確認      (Python版数・vendor・書込権限・設定)
+             ├─ launch_guard        (多重起動の判定)
+             ├─ server + boot_server(待ち受け → まず待機画面)
+             ├─ ブラウザを開く      (待機画面が出る)
+             ├─ 準備                (変換に使うものを読む)
+             └─ app へ引き継ぐ      (待ち受けは開き直さない)
 
-【なぜ「すでに起動しています」で断るのか】
-2つ目を起動させると、同じ設定を2つのプロセスが書き、どちらの画面の操作が
-効いているのか分からなくなります。**開くこと自体をお断りします** ──
-既存の画面が見当たらないときだけ、聞いたうえで開き直します。
+【待機画面を先に出す】
+起動で時間を食うのは、写してある日報管理ツール(42ファイル)の読み込み
+です。そのあとに待機画面を出したら、「待たせるために見せるもの」を待たせて
+いることになります ── 先に待ち受けだけ始めて、`boot_server` が待機画面を
+出し、本体ができたら**同じ待ち受けのまま**差し替えます。
 
-    通常起動  Start.vbs → pythonw start_app.py     (コンソールを出さない)
-    診断起動  start.bat → python start_app.py --diagnose
+使い方:
+
+    python start_app.py                通常どおり起動する
+    python start_app.py --no-browser   ブラウザを開かない(検証用)
+    python start_app.py --check        環境の確認だけして終わる(診断用)
+    python start_app.py --diagnose     コンソールにもログを出す(診断用)
 """
 from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import sys
 import time
 import webbrowser
@@ -29,8 +41,7 @@ sys.path.insert(0, str(HERE))
 # 写してある日報管理ツール。**同じコードを通すため**にここに置いてあります
 sys.path.insert(0, str(HERE / "vendor"))
 
-#: 動かすのに要る Python。標準ライブラリだけで書いてありますが、
-#: `X | None` の書き方(3.10) と `tomllib` 以降の作法に合わせて 3.11 以上
+#: 動かすのに要る Python
 MIN_PYTHON = (3, 11)
 
 EXIT_OK = 0
@@ -62,7 +73,7 @@ def tell(text: str, *, title: str = "", ask: bool = False) -> bool:
 
 
 # ------------------------------------------------------------------
-# 1. 実行環境を確認中
+# 実行環境の確認
 # ------------------------------------------------------------------
 def check_environment() -> list[str]:
     """足りないものを並べる。**空なら進めます。**"""
@@ -76,6 +87,8 @@ def check_environment() -> list[str]:
                      "フォルダごとコピーできているか確かめてください")
     if not (HERE / "converter").is_dir():
         found.append(f"converter が見当たりません({HERE / 'converter'})")
+    if not (HERE / "config" / "app.json").is_file():
+        found.append(f"設定が見当たりません({HERE / 'config' / 'app.json'})")
     return found
 
 
@@ -86,36 +99,28 @@ def prepare_local() -> None:
     そこへ作ると、同期の競合と権限の問題を呼びます。**書くものは
     `%LOCALAPPDATA%` へ。**
     """
-    from app import appinfo
-    appinfo.ensure_local_dirs()
-    sys.pycache_prefix = str(appinfo.local_dir("pycache"))
+    from converter import app_config
+    app_config.ensure_local_dirs()
+    sys.pycache_prefix = str(app_config.local_dir("pycache"))
     os.environ.setdefault("PYTHONPYCACHEPREFIX", sys.pycache_prefix)
 
 
+def check_writable() -> list[str]:
+    """ローカル領域へ書けるか。**書けないと、ログも設定も残せません。**"""
+    from converter import app_config
+    try:
+        app_config.ensure_local_dirs()
+        probe = app_config.local_dir("runtime") / ".write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        return [f"ローカル領域へ書けません({app_config.local_root()}): {exc}"]
+    return []
+
+
 # ------------------------------------------------------------------
-# 2. 待機画面(基盤仕様書 2.2)
+# 起動
 # ------------------------------------------------------------------
-def write_loading_page() -> Path:
-    """待機画面を、このPCのローカル領域へ書き出して返す。
-
-    アプリ本体側(共有フォルダかもしれない場所)へ書かないのは 2.7 のとおり。
-    ポートとログの場所を埋め込むので、**起動できなかったときに見る場所**が
-    その画面に出ます。
-    """
-    from app import appinfo, logging_setup
-    appinfo.ensure_local_dirs()
-    template = (HERE / "loading.html").read_text(encoding="utf-8")
-    page = (template
-            .replace("{{APP_NAME}}", appinfo.display_name())
-            .replace("{{VERSION}}", appinfo.version_label())
-            .replace("{{APP_ID}}", appinfo.app_id())
-            .replace("{{BASE_URL}}", appinfo.base_url())
-            .replace("{{LOG_DIR}}", logging_setup.log_paths()["folder"]))
-    target = appinfo.local_dir("runtime") / "loading.html"
-    target.write_text(page, encoding="utf-8")
-    return target
-
-
 def open_browser(url: str, log) -> None:
     try:
         webbrowser.open(url, new=1, autoraise=True)
@@ -124,104 +129,12 @@ def open_browser(url: str, log) -> None:
         tell(f"ブラウザを開けませんでした。次のURLを開いてください:\n{url}")
 
 
-# ------------------------------------------------------------------
-# 起動
-# ------------------------------------------------------------------
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(
-        description="エクセル → CSV 変換器 を起動します")
-    parser.add_argument("--diagnose", action="store_true",
-                        help="診断用。構成を表示し、コンソールにもログを出します")
-    parser.add_argument("--no-browser", action="store_true",
-                        help="ブラウザを開きません(調べるとき)")
-    args = parser.parse_args(argv)
-
-    problems = check_environment()
-    if problems:
-        tell("起動できません:\n\n  " + "\n  ".join(problems), title="起動できません")
-        return EXIT_ENV
-
-    prepare_local()
-    from app import appinfo, intake, logging_setup, routes, settings_store
-
-    log = logging_setup.launcher(console=args.diagnose)
-    logging_setup.application(console=args.diagnose)
-    logging_setup.quiet_vendor()
-
-    log.info("=" * 60)
-    log.info("起動します")
-    for line in appinfo.describe().splitlines():
-        log.info("  %s", line)
-    log.info("  Python        : %s (%s)", sys.version.split()[0], sys.executable)
-    if args.diagnose:
-        print(appinfo.describe())
-        print(f"Python        : {sys.version.split()[0]} ({sys.executable})")
-        print(f"ログ          : {logging_setup.log_paths()['folder']}")
-
-    # -- 多重起動の判定(基盤仕様書 2.4)---------------------------------
-    routes.RUNTIME.stage = "実行環境を確認中"
-    import launch_guard
-    existing = launch_guard.probe()
-    if existing.blocked:
-        log.warning("起動を断りました: %s", existing.detail)
-        text = launch_guard.refusal_text(existing)
-        if existing.state == launch_guard.OURS:
-            busy = (existing.info.get("screen") or {}).get("busy")
-            if busy:
-                tell(text, title="すでに起動しています")
-            elif tell(text + "\n\n画面を開き直しますか?",
-                      title="すでに起動しています", ask=True):
-                open_browser(existing.url, log)
-            return EXIT_ALREADY
-        tell(text, title="起動できません")
-        return EXIT_PORT
-
-    # -- 待ち受け ------------------------------------------------------
-    import server
-    srv = server.Server()
-    try:
-        srv.bind()
-    except OSError as exc:
-        # 判定のあと、束縛までのあいだに誰かが先に取ることがあります。
-        # **束縛の失敗が最後の歯止め**です
-        log.warning("ポートを使えませんでした: %s", exc)
-        tell(server.describe_bind_error(exc), title="起動できません")
-        return EXIT_PORT
-
-    stop_key = routes.RUNTIME.stop_key = os.urandom(16).hex()
-    launch_guard.write_instance(server.instance_info(stop_key))
-
-    if not args.no_browser:
-        page = write_loading_page()
-        log.info("待機画面: %s", page)
-        open_browser(page.as_uri(), log)
-
-    routes.RUNTIME.stage = "アプリを準備中"
-    srv.start_serving()
-
-    try:
-        warm_up(log)
-        routes.RUNTIME.stage = "接続を確認中"
-        settings_store.apply_to_vendor(settings_store.load())
-        intake.INTAKE.clear()                     # 前回の受け取りは持ち越さない
-        srv.mark_ready()
-        log.info("起動完了 %.1f秒 %s",
-                 time.time() - routes.RUNTIME.started_at, appinfo.base_url())
-        reason = srv.wait_until_stopped()
-        log.info("終了しました: %s", reason)
-    finally:
-        launch_guard.clear_instance()
-        intake.INTAKE.clear()
-        log.info("片づけました")
-    return EXIT_OK
-
-
 def warm_up(log) -> None:
     """変換に使うものを先に読んでおく。
 
-    最初の1回目だけ数秒かかることがあります(写してある日報管理ツールは
-    42ファイルあります)。**押してから待たされる**より、起動中に済ませて
-    おくほうが、待っている理由が分かります。
+    最初の1回だけ数秒かかることがあります(写してある日報管理ツールは
+    42ファイル)。**押してから待たされる**より、起動中に済ませておくほうが、
+    待っている理由が分かります。
     """
     started = time.time()
     try:
@@ -234,6 +147,136 @@ def warm_up(log) -> None:
         log.warning("変換の準備で失敗しました(押したときに出ます): %s", exc)
         return
     log.info("変換の準備ができました(%.1f秒)", time.time() - started)
+
+
+def start(*, open_browser_flag: bool = True) -> int:
+    """待ち受けを立てて、止められるまで動かす。"""
+    import app as app_package
+    import boot_server
+    import launch_guard
+    import server
+    from converter import (app_config, idle_exit, intake, jobs,
+                           user_settings)
+    from converter.logging_utils import get_logger
+
+    log = get_logger("launcher")
+
+    # -- 多重起動の判定(基盤仕様書 2.4)------------------------------
+    existing = launch_guard.check_existing()
+    if existing.blocked:
+        log.warning("起動を断りました: %s", existing.detail)
+        text = launch_guard.refusal_text(existing)
+        if existing.state == launch_guard.OURS:
+            busy = (existing.health.get("screen") or {}).get("busy")
+            if busy:
+                tell(text, title="すでに起動しています")
+            elif tell(text + "\n\n画面を開き直しますか?",
+                      title="すでに起動しています", ask=True):
+                open_browser(existing.url, log)
+            return EXIT_ALREADY
+        tell(text, title="起動できません")
+        return EXIT_PORT
+
+    # -- 待ち受け(まず待機画面)--------------------------------------
+    token = secrets.token_urlsafe(32)
+    boot = boot_server.BootApp(app_config.port())
+    handover = boot_server.Handover(boot)
+    srv = server.AppServer(handover)
+    try:
+        srv.bind()
+    except OSError as exc:
+        # 判定のあと、束縛までのあいだに誰かが先に取ることがあります。
+        # **束縛の失敗が最後の歯止め**です
+        log.warning("ポートを使えませんでした: %s", exc)
+        tell(server.describe_bind_error(exc), title="起動できません")
+        return EXIT_PORT
+
+    launch_guard.write_lock(launch_guard.new_lock(port=srv.port, token=token))
+    srv.start_serving()
+    if open_browser_flag:
+        open_browser(app_config.base_url(), log)
+
+    try:
+        # -- 準備 ----------------------------------------------------
+        handover.mark_stage("アプリを準備中", "prepare")
+        warm_up(log)
+
+        handover.mark_stage("接続を確認中", "connect")
+        user_settings.apply_to_vendor(user_settings.load())
+        intake.INTAKE.clear()                     # 前回の受け取りは持ち越さない
+
+        application = app_package.create_app(token=token, port=srv.port)
+        application.shutdown_hook = srv.request_stop
+        application.idle = idle_exit.IdleExit(busy=lambda: jobs.RUNNER.running,
+                                              stop=srv.request_stop)
+        application.idle.start()
+
+        # -- 引き継ぎ(待ち受けは開き直さない)-------------------------
+        handover.install(application)
+        application.mark_ready()
+        log.info("起動完了 %.1f秒 %s",
+                 time.time() - boot.started_at, app_config.base_url())
+
+        reason = srv.wait_until_stopped()
+        log.info("終了しました: %s", reason)
+    except Exception as exc:                      # noqa: BLE001 - 理由を出す
+        log.exception("起動の途中で失敗しました")
+        handover.mark_error(str(exc))
+        tell(f"起動できませんでした: {exc}", title="起動できません")
+        srv.wait_until_stopped()
+        return EXIT_ENV
+    finally:
+        launch_guard.remove_lock()
+        intake.INTAKE.clear()
+        log.info("片づけました")
+    return EXIT_OK
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description="エクセル → CSV 変換器 を起動します")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="診断用。構成を表示し、コンソールにもログを出します")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="ブラウザを開きません(検証用)")
+    parser.add_argument("--check", action="store_true",
+                        help="環境の確認だけして終わります(診断用)")
+    args = parser.parse_args(argv)
+
+    problems = check_environment()
+    if problems:
+        tell("起動できません:\n\n  " + "\n  ".join(problems), title="起動できません")
+        return EXIT_ENV
+
+    prepare_local()
+    from converter import app_config, logging_utils
+
+    if args.diagnose or args.check:
+        logging_utils.use_console(True)
+    log = logging_utils.get_logger("launcher")
+    logging_utils.quiet_vendor()
+
+    problems = check_writable()
+    if problems:
+        tell("起動できません:\n\n  " + "\n  ".join(problems), title="起動できません")
+        return EXIT_ENV
+
+    log.info("=" * 60)
+    log.info("起動します")
+    for line in app_config.describe().splitlines():
+        log.info("  %s", line)
+    log.info("  Python        : %s (%s)", sys.version.split()[0], sys.executable)
+
+    if args.check:
+        print(app_config.describe())
+        print(f"Python        : {sys.version.split()[0]} ({sys.executable})")
+        print(f"ログ          : {logging_utils.log_paths()['folder']}")
+        found = __import__("launch_guard").check_existing()
+        print(f"いまの状態    : {found.state}"
+              + (f" ── {found.detail}" if found.detail else ""))
+        return EXIT_OK
+
+    return start(open_browser_flag=not args.no_browser)
 
 
 if __name__ == "__main__":

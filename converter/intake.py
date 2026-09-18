@@ -18,16 +18,16 @@ r"""ドラッグで受け取ったブックの置き場所
 """
 from __future__ import annotations
 
-import logging
 import re
 import shutil
 import threading
 import unicodedata
 from pathlib import Path
 
-from . import appinfo
+from . import app_config
+from .logging_utils import get_logger
 
-log = logging.getLogger("xlcsv.app")
+log = get_logger("intake")
 
 #: 読める拡張子。`converter.run.SUFFIXES` と同じもの
 SUFFIXES = (".xlsx", ".xlsm")
@@ -38,7 +38,7 @@ _BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
 def folder() -> Path:
-    return appinfo.local_dir("work") / "intake"
+    return app_config.local_dir("work") / "intake"
 
 
 def safe_name(name: str) -> str:
@@ -75,14 +75,14 @@ class Intake:
             raise ValueError(f"{clean}: 読めるのは .xlsx と .xlsm です")
         if clean.startswith("~$"):
             raise ValueError(f"{clean}: Excelが開いている間の作業ファイルです")
-        limit = appinfo.max_files()
+        limit = app_config.max_files()
         with self._lock:
             if len(self._names) >= limit:
                 raise ValueError(f"一度に受けられるのは {limit} 本までです")
-            if len(data) > appinfo.max_file_bytes():
+            if len(data) > app_config.max_file_bytes():
                 raise ValueError(
                     f"{clean}: 大きすぎます"
-                    f"(上限 {appinfo.max_file_bytes() // 1024 // 1024}MB)")
+                    f"(上限 {app_config.max_file_bytes() // 1024 // 1024}MB)")
             target = folder()
             target.mkdir(parents=True, exist_ok=True)
             path = target / clean

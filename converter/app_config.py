@@ -7,7 +7,7 @@ r"""アプリ固有値の唯一の出どころ(`config/app.json` の読み取り
 起動基盤(`start_app.py` / `launch_guard.py` / `server.py` /
 `process_manager.py`)はこのモジュールだけを見ます。業務側の設定
 (入力元・出力先・ライン・参照用マスタ)は利用者が画面で変えるものなので、
-`settings_store.py` の担当です ── **配るときに決まる値**と**使う人が
+`user_settings.py` の担当です ── **配るときに決まる値**と**使う人が
 決める値**を混ぜないための分け方です。
 
 【ローカル領域】(基盤仕様書 2.7 / 4.6)
@@ -284,5 +284,5 @@ def describe() -> str:
     return "\n".join(lines)
 
 
-if __name__ == "__main__":        # python -m app.appinfo で確かめられます
+if __name__ == "__main__":        # python -m converter.app_config で確かめられます
     print(describe())

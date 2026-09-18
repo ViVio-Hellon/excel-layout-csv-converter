@@ -1,82 +1,139 @@
-"""Webサーバだけを動かす(基盤仕様書 2.5 / 4.2)
+"""Webサーバの起動だけを担当する(基盤仕様書 2.5)
 
-ここは**待ち受けて、`app.routes` へ渡して、返すだけ**です。環境の確認も
-多重起動の判定もしません ── それは `start_app.py` と `launch_guard.py` の
-担当です。この線を引いておくと、「起動で失敗したのか、Webで失敗したのか」
-がログと責務の両方で分かれます。
+起動監視(`launch_guard.py`)とWeb処理(`app/`)の境界。ここは「どの
+アプリを、どのポートで、どう止めるか」しか知りません。業務も画面も
+持たないので、**起動で失敗したのか、Webで失敗したのか**がログと責務の
+両方で分かれます。
 
 追加ライブラリは使いません(`http.server`)。現場のPCへ配るものなので、
 入れるものが増えるほど「動かない」理由が増えます。
+
+【受け渡しの形】
+WSGI の代わりに、このファイルが決める `Request` / `Response` の2つだけを
+約束にします。待機画面(`boot_server.BootApp`)も本体(`app.App`)も
+`dispatch(request) -> Response` を持っていればよく、**待ち受けを開き
+直さずに入れ替えられます**(`boot_server.Handover`)。
 """
 from __future__ import annotations
 
 import json
-import logging
-import secrets
+import socket
 import threading
 import time
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
-from app import appinfo, jobs, routes, screen
+from converter import app_config
+from converter.logging_utils import get_logger
 
-log = logging.getLogger("xlcsv.app")
+log = get_logger("server")
 
 #: 1回の書き込みで受ける最大。ブック1本ぶん(上限)に少し足したもの
-MAX_BODY = appinfo.max_file_bytes() + 1024 * 1024
+MAX_BODY = app_config.max_file_bytes() + 1024 * 1024
+
+#: 停止要求を受けてから閉じるまでの猶予(秒)。応答を返しきる前に止めると
+#: 「押したのに何も起きなかった」ように見えます
+GRACEFUL_TIMEOUT_SEC = 3
 
 
+# ------------------------------------------------------------------
+# 受け渡しの形
+# ------------------------------------------------------------------
+@dataclass
+class Request:
+    method: str
+    path: str
+    query: dict = field(default_factory=dict)
+    body: bytes = b""
+    headers: dict = field(default_factory=dict)
+    #: 受け取ったアプリ自身。Flask の `current_app` にあたるものを
+    #: **明示して渡します** ── スレッドローカルを1つ増やさないため
+    app: Any = None
+
+    def json(self) -> dict:
+        if not self.body:
+            return {}
+        try:
+            found = json.loads(self.body.decode("utf-8"))
+            return found if isinstance(found, dict) else {}
+        except Exception:                          # noqa: BLE001
+            return {}
+
+    def header(self, name: str, default: str = "") -> str:
+        return self.headers.get(name.lower(), default)
+
+    def arg(self, name: str, default: str = "") -> str:
+        values = self.query.get(name) or []
+        return values[0] if values else default
+
+
+@dataclass
+class Response:
+    status: int = 200
+    body: bytes = b""
+    content_type: str = "application/json; charset=utf-8"
+    headers: dict = field(default_factory=dict)
+
+
+def json_response(payload: dict, status: int = 200, **headers) -> Response:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return Response(status=status, body=body, headers=headers)
+
+
+def html_response(html: str, status: int = 200) -> Response:
+    return Response(status=status, body=html.encode("utf-8"),
+                    content_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "no-store, must-revalidate"})
+
+
+def refuse(reason: str, detail: str = "", status: int = 409, **extra) -> Response:
+    """断りは**理由を必ず添えます**(何をすればよいかまで書く)。"""
+    return json_response({"ok": False, "reason": reason, "detail": detail,
+                          **extra}, status=status)
+
+
+# ------------------------------------------------------------------
+# 翻訳するだけの受付
+# ------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
     server_version = "ExcelCsvConverter"
     protocol_version = "HTTP/1.1"
 
-    # -- 受ける ------------------------------------------------------
     def _handle(self, method: str) -> None:
         parsed = urlparse(self.path)
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_BODY:
-            self._send(routes.refuse(
-                "大きすぎます",
-                f"1回に送れるのは {MAX_BODY // 1024 // 1024}MB までです",
-                status=413))
+            self._send(refuse("大きすぎます",
+                              f"1回に送れるのは {MAX_BODY // 1024 // 1024}MB までです",
+                              status=413))
             self.close_connection = True
             return
         body = self.rfile.read(length) if length else b""
-        request = routes.Request(
-            method=method, path=parsed.path,
-            query=parse_qs(parsed.query), body=body,
-            headers={k.lower(): v for k, v in self.headers.items()})
+        application = self.server.application            # type: ignore[attr-defined]
+        request = Request(method=method, path=parsed.path,
+                          query=parse_qs(parsed.query), body=body,
+                          headers={k.lower(): v for k, v in self.headers.items()})
         try:
-            response = routes.dispatch(request)
-        except Exception as exc:                  # noqa: BLE001 - 落とさない
+            response = application.dispatch(request)
+        except Exception as exc:                   # noqa: BLE001 - 落とさない
             log.exception("要求を捌けませんでした: %s %s", method, parsed.path)
-            response = routes.json_response(
-                {"ok": False, "reason": "アプリの中で失敗しました",
-                 "detail": str(exc)}, status=500)
+            response = json_response({"ok": False, "reason": "アプリの中で失敗しました",
+                                      "detail": str(exc)}, status=500)
         self._send(response)
 
-    def do_GET(self) -> None:                     # noqa: N802
+    def do_GET(self) -> None:                      # noqa: N802
         self._handle("GET")
 
-    def do_POST(self) -> None:                    # noqa: N802
+    def do_POST(self) -> None:                     # noqa: N802
         self._handle("POST")
 
-    def do_OPTIONS(self) -> None:                 # noqa: N802
-        """待機画面(file://)からの問い合わせ用。**起動確認だけ**開けます。"""
-        allow = self.path.startswith("/api/health")
-        self.send_response(204 if allow else 405)
-        if allow:
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "content-type")
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-
-    # -- 返す --------------------------------------------------------
-    def _send(self, response: routes.Response) -> None:
+    def _send(self, response: Response) -> None:
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))
-        # 画面を組み込みで開かれると「2枚目」の判定をすり抜けられます
+        # 組み込みで開かれると「2枚目」の判定をすり抜けられます
         self.send_header("X-Frame-Options", "DENY")
         for key, value in response.headers.items():
             self.send_header(key, value)
@@ -84,12 +141,11 @@ class Handler(BaseHTTPRequestHandler):
         if response.body:
             self.wfile.write(response.body)
 
-    # -- ログ --------------------------------------------------------
-    def log_message(self, fmt: str, *args) -> None:   # noqa: A003
-        """標準エラーへ垂れ流さず、アプリのログへ。**成功は残しません。**
+    def log_message(self, fmt: str, *args) -> None:    # noqa: A003
+        """**成功は残しません。**
 
-        1秒おきの生存確認と進捗の問い合わせで、ログはすぐ埋まります。
-        残す値打ちがあるのは失敗だけです(基盤仕様書 2.6)。
+        心拍と進捗の問い合わせでログはすぐ埋まります。残す値打ちが
+        あるのは失敗だけです(基盤仕様書 2.6)。
         """
         try:
             status = int(args[1])
@@ -98,23 +154,36 @@ class Handler(BaseHTTPRequestHandler):
         if status >= 400:
             log.warning("%s - %s", self.address_string(), fmt % args)
 
-    def log_error(self, fmt: str, *args) -> None:     # noqa: A003
+    def log_error(self, fmt: str, *args) -> None:      # noqa: A003
         log.warning("%s - %s", self.address_string(), fmt % args)
 
 
-class Server:
-    """待ち受けと、終わり方をまとめたもの。"""
+# ------------------------------------------------------------------
+# 待ち受け
+# ------------------------------------------------------------------
+class AppServer:
+    """待ち受けているサーバ1つ分。
 
-    def __init__(self, host: str = "", port: int = 0) -> None:
-        self.host = host or appinfo.host()
-        self.port = port or appinfo.port()
-        self.httpd: ThreadingHTTPServer | None = None
-        self._thread: threading.Thread | None = None
+    `application` は `dispatch(request) -> Response` を持つもの。起動中は
+    待機画面(`boot_server.Handover`)を渡しておき、本体ができたら
+    そちらが中身を差し替えます ── **開き直しません。** 開き直すと、
+    その瞬間にブラウザの問い合わせが落ちて「接続できません」に見えます。
+    """
+
+    def __init__(self, application, *, host: str = "", port: int = 0) -> None:
+        self.application = application
+        self.host = host or app_config.host()
+        self.port = port or app_config.port()
+        self.httpd: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self._stopped = threading.Event()
+        self.stop_reason = ""
 
     def bind(self) -> ThreadingHTTPServer:
         """束縛する。**ここで失敗したら、それが多重起動の最後の歯止め**です。"""
         self.httpd = ThreadingHTTPServer((self.host, self.port), Handler)
         self.httpd.daemon_threads = True
+        self.httpd.application = self.application     # type: ignore[attr-defined]
         self.port = self.httpd.server_address[1]
         return self.httpd
 
@@ -122,103 +191,55 @@ class Server:
         """待ち受けを始める。**まだ「起動完了」とは言いません。**
 
         束縛できた時点で起動確認APIは答えられますが、答えられることと
-        使えることは別です。`ready` を立てるのは呼んだ側 ── 準備(写して
-        ある日報管理ツールの読込)が終わってからです。待機画面はその
-        `ready` を見て切り替わります(基盤仕様書 2.3)。
+        使えることは別です。`ready` を立てるのはアプリ側で、待機画面は
+        それを見て切り替わります(基盤仕様書 2.3)。
         """
         httpd = self.httpd or self.bind()
-        routes.RUNTIME.stop_key = routes.RUNTIME.stop_key or secrets.token_urlsafe(16)
         self._thread = threading.Thread(
             target=httpd.serve_forever, kwargs={"poll_interval": 0.3},
             name="http", daemon=True)
         self._thread.start()
-        log.info("待ち受けています %s", appinfo.base_url())
-        threading.Thread(target=self._watch_idle, name="idle", daemon=True).start()
+        log.info("待ち受けています http://%s:%s/", self.host, self.port)
 
-    def mark_ready(self) -> None:
-        routes.RUNTIME.ready = True
-        routes.RUNTIME.stage = "起動完了"
+    def request_stop(self, reason: str) -> None:
+        self.stop_reason = reason
+        self._stopped.set()
+
+    @property
+    def stopping(self) -> bool:
+        return self._stopped.is_set()
 
     def wait_until_stopped(self) -> str:
         """止めてと言われるまで待つ。**終わった理由を返します。**"""
-        httpd = self.httpd
         try:
-            while not routes.RUNTIME.shutdown.wait(0.5):
+            while not self._stopped.wait(0.5):
                 pass
         except KeyboardInterrupt:
-            routes.RUNTIME.request_stop("Ctrl+C で止められました")
+            self.request_stop("Ctrl+C で止められました")
         finally:
-            routes.RUNTIME.ready = False
-            if httpd:
-                httpd.shutdown()
-                httpd.server_close()
-        return routes.RUNTIME.stop_reason or "止められました"
-
-    def serve_forever_until_stopped(self) -> str:
-        self.start_serving()
-        self.mark_ready()
-        return self.wait_until_stopped()
-
-    # -- 画面が無くなったあと ----------------------------------------
-    def _watch_idle(self) -> None:
-        """画面が無いまま時間が経ったら、自分で終わる(基盤仕様書 2.9)。
-
-        **変換中は終わりません。** ブラウザを閉じても書き出しは終わらせます
-        ── 4本組のCSVを半分書いた状態で残すほうが危ないからです。
-        逆に、終わったあとも残り続けると次の起動が「すでに起動しています」
-        で断られ続けるので、誰も見ていないなら畳みます。
-        """
-        minutes = appinfo.idle_exit_minutes()
-        if minutes <= 0:
-            return
-        limit = minutes * 60
-        since = time.time()
-        while not routes.RUNTIME.shutdown.is_set():
-            time.sleep(5)
-            if screen.LOCK.busy() or jobs.RUNNER.running:
-                since = time.time()
-                continue
-            if time.time() - since > limit:
-                log.info("画面が %d 分ありませんでした。終わります", minutes)
-                routes.RUNTIME.request_stop(
-                    f"画面が {minutes} 分無かったので終わりました")
-                return
+            if self.httpd:
+                self.httpd.shutdown()
+                self.httpd.server_close()
+        return self.stop_reason or "止められました"
 
 
-def instance_info(stop_key: str = "") -> dict:
-    """`runtime/instance.json` に書く中身(停止と多重起動の判定に使います)。"""
-    import os
-    import sys as _sys
-    return {
-        "app_id": appinfo.app_id(),
-        "name": appinfo.display_name(),
-        "version": appinfo.version(),
-        "pid": os.getpid(),
-        "port": appinfo.port(),
-        "url": appinfo.base_url(),
-        "python": _sys.executable,
-        "app_root": str(appinfo.APP_ROOT),
-        "started_at": time.time(),
-        "stop_key": stop_key,
-    }
+def wait_until_listening(port: int, *, host: str = "",
+                         timeout: float = 10.0) -> bool:
+    """そのポートが受け付けるようになるまで待つ(起動の確認に使う)。"""
+    host = host or app_config.host()
+    limit = time.time() + timeout
+    while time.time() < limit:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            if sock.connect_ex((host, port)) == 0:
+                return True
+        time.sleep(0.1)
+    return False
 
 
 def describe_bind_error(exc: OSError) -> str:
     """束縛に失敗した理由を、次に何をすればよいか分かる言葉にする。"""
-    return (f"ポート {appinfo.port()} を使えません({exc})。\n"
+    return (f"ポート {app_config.port()} を使えません({exc})。\n"
             "  ・このアプリがすでに起動している場合は、その画面を使ってください\n"
             "  ・別のアプリが使っている場合は config/app.json の "
             "server.port を変えてください")
-
-
-if __name__ == "__main__":        # 調べるとき用。通常は start_app.py から
-    from app import logging_setup
-    logging_setup.application(console=True)
-    logging_setup.quiet_vendor()
-    srv = Server()
-    try:
-        srv.bind()
-    except OSError as error:
-        raise SystemExit(describe_bind_error(error))
-    print(json.dumps(instance_info(), ensure_ascii=False, indent=2))
-    print(srv.serve_forever_until_stopped())

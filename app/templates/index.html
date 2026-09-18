@@ -1,48 +1,13 @@
-<!DOCTYPE html>
 <!--
-  アプリ画面
+  変換の画面(中身)
 
-  【この画面は1枚だけ開けます】
-  2枚開けると、2つの画面が同じ作業状態を奪い合います(片方で開始、もう
-  片方で中止、片方で保存した設定をもう片方が古いまま表示)。**開くこと
-  自体をお断りします** ── 判定はサーバ(`app/screen.py`)と、この画面の
-  `static/js/app.js` の2段で行います。
+  外枠は `base.html`。ここは設定部・入力・変換・結果の4つだけです。
+
+  **この画面は1枚しか開けません。** 2枚開けると同じ作業状態を奪い合う
+  ので、開くこと自体をお断りします。判定はサーバ
+  (`converter/screen_lock.py`)と、この画面の `static/js/screen.js` の
+  2段で行います。
 -->
-<html lang="ja">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{APP_NAME}}</title>
-<link rel="icon" href="data:,">
-<link rel="stylesheet" href="/static/css/app.css">
-</head>
-<body class="booting">
-
-<!-- 開けないとき・切れたときに、画面全体を覆う(操作させない) -->
-<div class="gate" id="gate" hidden>
-  <div class="gate-panel">
-    <div class="gate-mark" id="gate-mark">!</div>
-    <h2 id="gate-title">確認しています</h2>
-    <p id="gate-detail">この画面を使ってよいか、確認しています。</p>
-    <div class="gate-buttons">
-      <button class="primary" id="gate-retry">もう一度確認する</button>
-      <button id="gate-close">この画面を閉じる</button>
-    </div>
-    <p class="gate-note" id="gate-note"></p>
-  </div>
-</div>
-
-<header class="bar">
-  <div class="title">
-    <strong>{{APP_NAME}}</strong>
-    <span class="badge">{{VERSION}}</span>
-  </div>
-  <div class="bar-right">
-    <span class="conn" id="conn"><i></i><span id="conn-text">接続中</span></span>
-    <button id="quit" class="ghost">アプリを終了</button>
-  </div>
-</header>
-
 <main hidden id="main">
 
   <!-- 設定部 ---------------------------------------------------- -->
@@ -186,8 +151,3 @@
     <pre id="diag" hidden></pre>
   </footer>
 </main>
-
-<script>window.BOOT = {{BOOT}};</script>
-<script src="/static/js/app.js"></script>
-</body>
-</html>

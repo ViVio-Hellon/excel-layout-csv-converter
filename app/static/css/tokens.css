@@ -1,0 +1,59 @@
+/* 色と寸法の出どころ ── **ここ1つ**
+ *
+ * 画面(`base` / `layout` / `components`)も、起動待機画面
+ * (`converter/boot_screen.py` がこのファイルを読んで埋め込む)も、
+ * ここの値で描きます。2か所に色を書くと、直したほうと直していない
+ * ほうが場面によって出ます。
+ *
+ * 現場のPCで使うので、細い字と薄い色は避けています(明るい場所でも
+ * 読めるように)。暗い設定の端末では下の block が上書きします。
+ */
+:root {
+  --bg:          #f4f6f9;
+  --card:        #ffffff;
+  --sunk:        #eef2f7;
+  --line:        #d9e0ea;
+  --text:        #16202c;
+  --dim:         #5c6c80;
+  --accent:      #1f6feb;
+  --accent-soft: #e8f1ff;
+  --ok:          #1a7f4b;
+  --warn:        #9a5b00;
+  --warn-soft:   #fff6e5;
+  --bad:         #c0392b;
+  --bad-soft:    #fdecea;
+  --shadow: 0 1px 2px rgba(16, 32, 48, .06), 0 4px 14px rgba(16, 32, 48, .05);
+
+  /* 起動待機画面の地。帯と地続きに見えるよう、濃紺で固定します
+   * ── ここだけは端末の明暗設定に関わらず同じ見え方にします */
+  --boot-bg:     #0f1720;
+  --boot-panel:  #172230;
+  --boot-line:   #24344a;
+  --boot-text:   #e8eef6;
+  --boot-dim:    #93a4b8;
+
+  --radius:      12px;
+  --radius-sm:   7px;
+  --gap:         16px;
+  --font: "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  --mono: "Consolas", "Yu Gothic UI", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:          #0f1720;
+    --card:        #172230;
+    --sunk:        #101a26;
+    --line:        #27364a;
+    --text:        #e8eef6;
+    --dim:         #95a6ba;
+    --accent:      #4da3ff;
+    --accent-soft: #14283f;
+    --ok:          #46c98a;
+    --warn:        #ffb648;
+    --warn-soft:   #2a2114;
+    --bad:         #ff7a6b;
+    --bad-soft:    #2c1a18;
+    --shadow: none;
+  }
+}

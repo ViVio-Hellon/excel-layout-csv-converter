@@ -4,8 +4,8 @@
 手で書いた表は、コードが変わったときに黙って古くなります。読む相手が
 `vendor/nippou/logic/nippou_sheet.py` なのだから、そこから出します。
 
-    python tools/座標表を出す.py            画面に出す
-    python tools/座標表を出す.py --write     docs/座標表.md を書き直す
+    python scripts/座標表を出す.py            画面に出す
+    python scripts/座標表を出す.py --write     docs/座標表.md を書き直す
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from nippou.logic import nippou_sheet as ns      # noqa: E402
 
 HEAD = """# 日付シートの座標表
 
-**このファイルは `tools/座標表を出す.py` が書きます。** 手で直さないで
+**このファイルは `scripts/座標表を出す.py` が書きます。** 手で直さないで
 ください ── 読む相手は `vendor/nippou/logic/nippou_sheet.py` なので、
 そちらを直してから出し直します。
 

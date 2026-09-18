@@ -39,8 +39,8 @@ stop.bat    バックエンドの停止
 | **再読込** | 断りません(同じタブは持ち主のまま) |
 | 閉じて開き直す | 開けます(10秒ほどで空きます) |
 
-止め方は3段です。プロセス(`launch_guard.py`)、サーバ(`app/screen.py`)、
-ブラウザ(`app/static/js/app.js`)。**どれか1つでは足りません** ── 複製した
+止め方は3段です。プロセス(`launch_guard.py`)、サーバ(`converter/screen_lock.py`)、
+ブラウザ(`app/static/js/screen.js`)。**どれか1つでは足りません** ── 複製した
 タブはブラウザ側でしか見分けられず、別のブラウザはサーバ側でしか止められない
 からです。
 
@@ -171,9 +171,9 @@ xlsx → 日報の明細 → 保存 → 集計を作り直す → CSV
 python -m unittest discover -s tests -t . -q
 ```
 
-画面と起動基盤のぶんも同じところで走ります(`tests/test_web.py` ──
-2枚目を断ること、再読込は断らないこと、100本の上限、進捗、中止、
-多重起動の判定)。
+画面と起動基盤のぶんも同じところで走ります ── 2枚目を断ること、
+再読込は断らないこと、100本の上限、進捗、中止、多重起動の判定、
+起動ファイルの文字コードまで(`tests/` の一覧は [docs/設計.md](docs/設計.md) §8)。
 
 **実物のブックは置いていません** ── 作業者名も納入先も実名なので
 (`.gitignore`)。テストは同じ座標へ同じ形の値を置いたブックを自分で
@@ -182,36 +182,46 @@ python -m unittest discover -s tests -t . -q
 ## 中身
 
 起動の仕組みと業務機能を分けています(社内「汎用Webアプリ作成 基盤仕様書」
-2.5)。起動で失敗したのか、変換で失敗したのかを、責務とログの両方で
-分けられるようにするためです。
+2.5)。構成は同じ作りの `python-web-tools`(梱包資材総合ツール)にそろえて
+あります ── 起動・停止・監視の作法を覚え直さずに済むようにするためです。
 
 ```
 Start.vbs / start.bat / stop.bat   利用者の入口(通常 / 診断 / 停止)
 start_app.py            起動の開始点。環境を整え、起動してよいかを決める
 launch_guard.py         多重起動の判定(応答で確かめる)
-server.py               Webサーバだけ
+boot_server.py          まず待機画面を出し、本体へ引き継ぐ
+server.py               待ち受けと、受け渡しの形(Request / Response)
 process_manager.py      対象のアプリだけを安全に止める
-loading.html            起動待機表示
-convert.py              コマンド(入口)
+convert.py              コマンド版の入口
+requirements.txt        **何も要りません**(そう書き残してあります)
 
-app/                    画面と業務機能
-  appinfo.py            アプリ固有値(ID・ポート・上限・ローカル領域)の1か所
-  settings_store.py     設定部(入力元・出力先・ライン・参照用マスタ)
-  screen.py             **画面を1枚に絞る**
+app/                    画面層だけ
+  __init__.py           組み立てと守り(Host・オリジン・合言葉・画面の占有)
+  shell.py              外枠(base.html)に渡す値
+  routes/               health / screen / settings / input / job
+  templates/            base.html + index.html
+  static/css/           tokens / base / layout / components
+  static/js/            api / screen / health / toast / busy / progress / views
+
+converter/              業務と基盤
+  app_config.py         アプリ固有値(ID・ポート・上限・ローカル領域)
+  user_settings.py      設定部(入力元・出力先・ライン・参照用マスタ)
+  screen_lock.py        **画面を1枚に絞る**
   jobs.py               変換の実行・進捗・中止
   intake.py             ドラッグで受け取ったブックの置き場所
-  routes.py             画面とAPIの受付
-  logging_setup.py      ログ(launcher.log / app.log)
-  templates/ static/    画面
-
-converter/
+  idle_exit.py          画面が居なくなったら終わる
+  boot_screen.py        起動待機画面の骨格
+  logging_utils.py      ログ(launcher.log / app.log)
   run.py                xlsx → CSV の道すじ
   check.py              シート自身の合計との突き合わせ(純粋)
+
 vendor/                 日報管理ツールの写し。**ここは直しません**
 config/app.json         アプリごとに決める値(ここだけ直せば配れます)
-docs/運用.md            起動・停止・困ったとき
+docs/設計.md            作りの説明
+docs/はじめに読む_起動と使い方.md   現場向けの手順
+docs/変更履歴.md        版ごとに何が変わったか
 docs/座標表.md          どのセルがどの欄か(コードから起こす)
-tools/座標表を出す.py    ↑ を書き直す
+scripts/座標表を出す.py  ↑ を書き直す
 tests/
 ```
 

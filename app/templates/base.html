@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<!--
+  画面の外枠
+
+  帯・断りの覆い・読み込むものだけを持ちます。中身は `index.html` が
+  `{{CONTENT}}` のところへ入ります ── 骨組みを2枚持たないための形です。
+  差し込みは `app/shell.py` の置き換えで、テンプレート機能は入れて
+  いません(追加ライブラリを増やさないため)。
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{APP_NAME}}</title>
+<link rel="icon" href="data:image/svg+xml,{{FAVICON}}">
+<link rel="stylesheet" href="/static/css/tokens.css">
+<link rel="stylesheet" href="/static/css/base.css">
+<link rel="stylesheet" href="/static/css/layout.css">
+<link rel="stylesheet" href="/static/css/components.css">
+</head>
+<body class="booting">
+
+<!-- 開けないとき・切れたときに、画面全体を覆う(操作させない) -->
+<div class="gate" id="gate" hidden>
+  <div class="gate-panel">
+    <div class="gate-mark" id="gate-mark">!</div>
+    <h2 id="gate-title">確認しています</h2>
+    <p id="gate-detail">この画面を使ってよいか、確認しています。</p>
+    <div class="gate-buttons">
+      <button class="primary" id="gate-retry">もう一度確認する</button>
+      <button id="gate-close">この画面を閉じる</button>
+    </div>
+    <p class="gate-note" id="gate-note"></p>
+  </div>
+</div>
+
+<header class="bar">
+  <div class="title">
+    <strong>{{APP_NAME}}</strong>
+    <span class="badge">{{VERSION}}</span>
+  </div>
+  <div class="bar-right">
+    <span class="conn" id="conn"><i></i><span id="conn-text">接続中</span></span>
+    <button id="quit" class="ghost">アプリを終了</button>
+  </div>
+</header>
+
+{{CONTENT}}
+
+<script>window.APP = {{BOOT}};</script>
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

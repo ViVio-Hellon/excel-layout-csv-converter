@@ -1,8 +1,8 @@
 r"""設定部 ── 入力元・出力先・ライン・参照用マスタ
 
-【`appinfo.py` との違い】
-- `appinfo`        … 配るときに決まる値(アプリID・ポート・上限・ローカル領域)
-- `settings_store` … **使う人が画面で変える値**(どこを読んで、どこへ出すか)
+【`app_config.py` との違い】
+- `app_config`     … 配るときに決まる値(アプリID・ポート・上限・ローカル領域)
+- `user_settings`  … **使う人が画面で変える値**(どこを読んで、どこへ出すか)
 
 置き場所は利用者ごとのローカル領域の `data`(基盤仕様書 2.7)。アプリ本体は
 共有フォルダに置かれることがあるので、そこへ書くと**他の人の設定と
@@ -22,7 +22,7 @@ import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import appinfo
+from . import app_config
 
 #: 画面から変えられる項目。**表示名の出どころもここ1つ**
 FIELDS = ("input_dir", "output_dir", "line", "ref_dir")
@@ -38,7 +38,7 @@ _lock = threading.Lock()
 
 
 def path_of() -> Path:
-    return appinfo.local_dir("data") / "settings.json"
+    return app_config.local_dir("data") / "settings.json"
 
 
 @dataclass
@@ -68,12 +68,12 @@ def resolve(text: str) -> Path:
     if not trimmed:
         raise ValueError("道が空です")
     path = Path(trimmed).expanduser()
-    return path if path.is_absolute() else appinfo.APP_ROOT / path
+    return path if path.is_absolute() else app_config.APP_ROOT / path
 
 
 def load() -> Settings:
     """保存された設定。無ければ `config/app.json` の既定値。"""
-    values = dict(appinfo.defaults())
+    values = dict(app_config.defaults())
     try:
         raw = json.loads(path_of().read_text(encoding="utf-8"))
         if isinstance(raw, dict):
@@ -94,7 +94,7 @@ def save(values: dict) -> Settings:
         if key in values:
             merged[key] = clean(str(values.get(key) or ""))
     settings = Settings(**merged)
-    appinfo.ensure_local_dirs()
+    app_config.ensure_local_dirs()
     with _lock:
         target = path_of()
         tmp = target.with_suffix(".json.tmp")
@@ -169,8 +169,8 @@ def apply_to_vendor(settings: Settings) -> None:
     ここで切り離します(変換用の使い捨てDBは `converter.run` が別に作る
     ので、この向き先が業務データに触ることはありません)。
     """
-    appinfo.ensure_local_dirs()
-    os.environ["NIPPOU_APP_DIR"] = str(appinfo.local_dir("work") / "nippou")
+    app_config.ensure_local_dirs()
+    os.environ["NIPPOU_APP_DIR"] = str(app_config.local_dir("work") / "nippou")
     Path(os.environ["NIPPOU_APP_DIR"]).mkdir(parents=True, exist_ok=True)
     if settings.ref_dir:
         try:
