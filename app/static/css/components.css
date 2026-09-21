@@ -40,6 +40,7 @@
   transition: width .25s ease;
 }
 .notice {
+  white-space: pre-line;      /* 出力先を改行で分けて出す */
   margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 13px;
   background: var(--accent-soft); border: 1px solid var(--line);
 }

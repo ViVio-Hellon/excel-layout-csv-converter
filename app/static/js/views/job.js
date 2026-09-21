@@ -51,7 +51,8 @@ export function render(job) {
     const kind = job.counts.bad ? "bad" : (job.counts.suspect ? "warn" : "");
     toast.notice(job.state + " ── " + (job.message || "")
                  + (job.error ? " / " + job.error : "")
-                 + (job.dry_run || !job.out_dir ? "" : "  出力先: " + job.out_dir),
+                 + (job.dry_run || !job.out_dir ? "" : "  出力先: " + job.out_dir)
+                 + (job.tally_path ? "\n機側データ集計: " + job.tally_path : ""),
                  kind);
     if (job.id !== lastId) {
       lastId = job.id;
@@ -76,7 +77,8 @@ function renderResult(job) {
    ["数が合わない", counts.suspect, counts.suspect ? "warn" : ""],
    ["読めなかった", counts.bad, counts.bad ? "bad" : ""],
    [job.dry_run ? "書いたCSV(確認のみ)" : "書いたCSV", job.written, ""],
-  ].forEach((item) => {
+  ].concat(job.tally ? [["機側データ集計(行)", job.tally_rows, ""]] : [])
+   .forEach((item) => {
     const tile = document.createElement("div");
     tile.className = "tile " + item[2];
     tile.innerHTML = "<b></b><span></span>";
@@ -111,7 +113,8 @@ function start() {
   toast.notice("");
   api("/api/job/start", {
     json: { source: folderSource() ? "folder" : "intake",
-            dry_run: $("dry_run").checked },
+            dry_run: $("dry_run").checked,
+            tally: $("tally").checked },
   }).then((result) => {
     if (!result.ok) { return toast.notice(reason(result), "bad"); }
     render(result.data.job);

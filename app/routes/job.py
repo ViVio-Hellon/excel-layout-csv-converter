@@ -18,6 +18,7 @@ def start(request: Request) -> Response:
     payload = request.json()
     source = str(payload.get("source", "intake"))
     dry_run = bool(payload.get("dry_run", False))
+    tally = bool(payload.get("tally", False))
     settings = user_settings.load()
 
     found = user_settings.problems(settings, need_input=(source == "folder"))
@@ -29,7 +30,8 @@ def start(request: Request) -> Response:
     books = (jobs.gather(settings.input_dir) if source == "folder"
              else intake.INTAKE.files())
     try:
-        snapshot = jobs.RUNNER.start(books, settings, dry_run=dry_run)
+        snapshot = jobs.RUNNER.start(books, settings, dry_run=dry_run,
+                                     tally=tally)
     except (ValueError, RuntimeError) as exc:
         return refuse("始められません", str(exc), status=400)
     return json_response({"ok": True, "job": snapshot})

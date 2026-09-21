@@ -101,7 +101,9 @@
     <div class="card-head">
       <h2>変換</h2>
       <p>1日・1ラインごとに4本のCSVと、列の説明を書きます。
-         <b>ブラウザへダウンロードはしません</b> ── 出力先フォルダへ直接書きます。</p>
+         <b>ブラウザへダウンロードはしません</b> ── 出力先フォルダへ直接書きます。<br>
+         「機側データ集計」を付けると、VBAと同じ拾い方・同じ並びで
+         <b>読ませたぶん全部を1本のCSV</b>にも出します(停止3枠のブックのみ)。</p>
     </div>
 
     <div class="row">
@@ -109,6 +111,8 @@
       <button id="cancel" class="danger" hidden>中止</button>
       <label class="check"><input type="checkbox" id="dry_run">
         確かめるだけ(CSVを書きません)</label>
+      <label class="check"><input type="checkbox" id="tally">
+        機側データ集計も出す(VBAと同じ転記を1本のCSVに)</label>
     </div>
 
     <div class="progress" id="progress" hidden>

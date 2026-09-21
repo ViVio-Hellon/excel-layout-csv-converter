@@ -52,6 +52,7 @@ FAILED = "失敗しました"
 
 PHASE_READ = "読み取り"
 PHASE_WRITE = "CSVの書き出し"
+PHASE_TALLY = "機側データ集計"
 PHASE_END = "終わりました"
 
 
@@ -99,6 +100,11 @@ class Job:
     written: int = 0
     master_notice: str = ""
     master_ok: bool = False
+    #: 機側データ集計(VBAと同じ転記)。頼まれたときだけ動きます
+    tally: bool = False
+    tally_rows: int = 0
+    tally_path: str = ""
+    tally_message: str = ""
 
     # -- 数えかた ---------------------------------------------------
     @property
@@ -150,6 +156,10 @@ class Job:
             "written": self.written,
             "master_notice": self.master_notice,
             "master_ok": self.master_ok,
+            "tally": self.tally,
+            "tally_rows": self.tally_rows,
+            "tally_path": self.tally_path,
+            "tally_message": self.tally_message,
             "files": [dict(asdict(f), mark=f.mark) for f in self.files],
             "counts": {
                 "files": len(self.files),
@@ -212,7 +222,7 @@ class Runner:
 
     # -- 操作 --------------------------------------------------------
     def start(self, books: list[Path], settings: user_settings.Settings, *,
-              dry_run: bool = False) -> dict:
+              dry_run: bool = False, tally: bool = False) -> dict:
         with self._lock:
             if self.job.state == RUNNING:
                 raise RuntimeError("すでに変換中です")
@@ -227,13 +237,14 @@ class Runner:
             self._cancel.clear()
             self.job = Job(id=uuid.uuid4().hex[:12], state=RUNNING,
                            phase=PHASE_READ, total=len(books),
-                           dry_run=dry_run, out_dir=out_dir,
+                           dry_run=dry_run, out_dir=out_dir, tally=tally,
                            line=settings.line, started_at=time.time())
             job = self.job
         user_settings.apply_to_vendor(settings)
         job.master_ok, job.master_notice = master_notice()
-        log.info("変換開始 id=%s %d本 line=%r dry_run=%s → %s",
-                 job.id, job.total, settings.line, dry_run, out_dir or "(書きません)")
+        log.info("変換開始 id=%s %d本 line=%r dry_run=%s 機側データ集計=%s → %s",
+                 job.id, job.total, settings.line, dry_run, tally,
+                 out_dir or "(書きません)")
         self._thread = threading.Thread(
             target=self._run, args=(books, settings, dry_run, job),
             name="convert", daemon=True)
@@ -280,6 +291,8 @@ class Runner:
             found = run.convert([str(b) for b in books], job.out_dir or ".",
                                 line=settings.line, dry_run=dry_run,
                                 on_file=on_file)
+            if job.tally:
+                self._tally(books, job, dry_run)
             with self._lock:
                 job.written = len(found.written)
                 job.state = DONE
@@ -308,6 +321,37 @@ class Runner:
                      len(job.read_ok), len(job.files), len(job.verified),
                      job.written, job.elapsed())
 
+    def _tally(self, books: list[Path], job: Job, dry_run: bool) -> None:
+        """VBAと同じ転記を1本のCSVに出す(`converter/tally.py`)。
+
+        **変換とは別の出口**です。既存の4本組CSVには手を入れません ──
+        あちらは日報管理ツールと1バイトも違わないことを確かめてあるので、
+        混ぜると確かめ直しが要ります。
+        """
+        from . import tally as tally_mod
+
+        with self._lock:
+            job.phase = PHASE_TALLY
+            job.message = "機側データ集計を作っています"
+        try:
+            found = tally_mod.build(books)
+            with self._lock:
+                job.tally_rows = len(found.rows)
+                job.tally_message = found.summary()
+            if not dry_run and found.rows:
+                path = tally_mod.write_csv(found, job.out_dir)
+                with self._lock:
+                    job.tally_path = str(path)
+            skipped = [s for s in found.sheets if not s.taken]
+            if skipped:
+                log.info("機側データ集計: 拾わなかったシート %d 枚(%s)",
+                         len(skipped), skipped[0].skipped)
+            log.info("機側データ集計: %s", found.summary())
+        except Exception as exc:                  # noqa: BLE001 - 変換は済んでいる
+            with self._lock:
+                job.tally_message = f"機側データ集計を作れませんでした: {exc}"
+            log.exception("機側データ集計で失敗しました id=%s", job.id)
+
     @staticmethod
     def _summary_text(job: Job) -> str:
         """終わったあとの1行。**合わなかったものを先に言います。**"""
@@ -321,6 +365,8 @@ class Runner:
             parts.append("確かめただけなので、CSVは書いていません")
         else:
             parts.append(f"書いたCSV {job.written} 本")
+        if job.tally and job.tally_message:
+            parts.append(f"機側データ集計 {job.tally_message}")
         return " / ".join(parts)
 
 
