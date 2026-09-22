@@ -286,6 +286,31 @@ class 書き出し(Base):
         self.assertEqual(rows[0], list(tally.HEADERS))
         self.assertEqual(rows[1][tally.LOT], "L1")
 
+    def test_書けなかったら前のCSVを壊さない(self) -> None:
+        """`open(..., "w")` は開いた瞬間に中身を消します。**置き換えにします。**"""
+        import os
+
+        found = tally.build([self.book({8: {"D": "L1", "L": "9"}})])
+        out = self.tmp / "out"
+        first = tally.write_csv(found, out)
+        before = first.read_bytes()
+
+        # 置き換えに失敗する状況(書き先がフォルダになっている等)を作る
+        real_replace = os.replace
+
+        def refuse(src, dst):
+            raise PermissionError("使用中です")
+
+        os.replace = refuse
+        self.addCleanup(setattr, os, "replace", real_replace)
+        with self.assertRaises(PermissionError) as caught:
+            tally.write_csv(found, out)
+        os.replace = real_replace
+
+        self.assertIn("開いたまま", str(caught.exception))
+        self.assertEqual(first.read_bytes(), before)      # 前のCSVは無事
+        self.assertEqual(list(out.glob("*.tmp")), [])     # 仮のものは残さない
+
     def test_名前に日付の幅が入る(self) -> None:
         first = self.book({8: {"D": "L1", "L": "9"}}, file="1.xlsx")
         second = self.book({8: {"D": "L2", "L": "9"}}, file="2.xlsx",

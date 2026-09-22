@@ -33,6 +33,7 @@ VBA はチェックボックスで停止2枠/3枠を選べますが、実物の�
 from __future__ import annotations
 
 import csv
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -479,12 +480,40 @@ def write_csv(tally: Tally, out_dir) -> Path:
     """CSVを1本書いて、その道を返す。
 
     BOM付き UTF-8 ── Windows の Excel でそのまま開けます(既存のCSVと同じ)。
+
+    【いきなり本番のファイルへ書きません】
+    `open(..., "w")` は**開いた瞬間に中身を消します。** 書いている途中で
+    失敗すると(共有が切れた・Excelで開かれていた・容量が尽きた)、前に
+    出したCSVが**途中まで**の姿で残ります。出来上がったものを置き換える
+    形にすれば、失敗しても前のCSVはそのままです。
+
+    同じフォルダに仮の名前で書いてから置き換えます ── 別のフォルダに
+    書くと、置き換えが1回の操作で済まず(別ボリュームだと写しになる)、
+    途中の姿が見える隙ができます。
+
+    【Excelで開いたままだと書けません】
+    Windowsでは、開かれているファイルは置き換えられません。**前のCSVは
+    無事のまま**なので、閉じてからやり直せます。そのことが分かる言葉で
+    断ります。
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{file_stem(tally)}.csv"
-    with open(path, "w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(HEADERS)
-        writer.writerows(tally.rows)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(HEADERS)
+            writer.writerows(tally.rows)
+        os.replace(tmp, path)
+    except PermissionError as exc:
+        raise PermissionError(
+            f"{path.name} を書けませんでした。Excelなどで開いたままに"
+            f"なっていませんか(前に出したCSVはそのまま残っています): {exc}"
+        ) from exc
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
     return path
