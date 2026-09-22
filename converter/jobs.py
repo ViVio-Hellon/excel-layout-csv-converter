@@ -50,6 +50,10 @@ DONE = "完了"
 STOPPED = "中止しました"
 FAILED = "失敗しました"
 
+#: 仕事の種類。画面のタブと同じ
+KIND_CONVERT = "変換"
+KIND_TALLY = "機側データ集計"
+
 PHASE_READ = "読み取り"
 PHASE_WRITE = "CSVの書き出し"
 PHASE_TALLY = "機側データ集計"
@@ -84,6 +88,7 @@ class FileRow:
 @dataclass
 class Job:
     id: str = ""
+    kind: str = KIND_CONVERT
     state: str = READY
     phase: str = ""
     total: int = 0
@@ -139,6 +144,7 @@ class Job:
     def snapshot(self) -> dict:
         found = {
             "id": self.id,
+            "kind": self.kind,
             "state": self.state,
             "phase": self.phase,
             "running": self.state == RUNNING,
@@ -251,6 +257,38 @@ class Runner:
         self._thread.start()
         return self.snapshot()
 
+    def start_tally(self, sources: list[Path],
+                    settings: user_settings.Settings) -> dict:
+        """機側データ集計だけを走らせる(変換はしません)。
+
+        タブで分けてあるので、**集計だけ欲しいときに4本組CSVは出ません**。
+        受けるのはブック(.xlsx / .xlsm)と、前に出した集計CSV、シートを
+        CSVで保存したものです(`converter/tally.py`)。
+        """
+        with self._lock:
+            if self.job.state == RUNNING:
+                raise RuntimeError("すでに実行中です")
+            if not sources:
+                raise ValueError("読む相手がありません(.xlsx / .xlsm / .csv)")
+            limit = app_config.max_files()
+            if len(sources) > limit:
+                raise ValueError(
+                    f"一度に読めるのは {limit} 本までです(いまは {len(sources)} 本)。"
+                    "分けて実行してください")
+            out_dir = str(user_settings.ensure_output(settings))
+            self._cancel.clear()
+            self.job = Job(id=uuid.uuid4().hex[:12], kind=KIND_TALLY,
+                           state=RUNNING, phase=PHASE_TALLY,
+                           total=len(sources), out_dir=out_dir, tally=True,
+                           started_at=time.time())
+            job = self.job
+        log.info("機側データ集計 開始 id=%s %d本 → %s", job.id, job.total, out_dir)
+        self._thread = threading.Thread(
+            target=self._run_tally, args=(sources, job),
+            name="tally", daemon=True)
+        self._thread.start()
+        return self.snapshot()
+
     def cancel(self) -> bool:
         """中止を頼む。**読み取り中だけ効きます**(書き出しは止めません)。"""
         if not self.running:
@@ -320,6 +358,60 @@ class Runner:
                      "書いたCSV=%d %.1f秒", job.id, job.state,
                      len(job.read_ok), len(job.files), len(job.verified),
                      job.written, job.elapsed())
+
+    def _run_tally(self, sources: list[Path], job: Job) -> None:
+        """集計だけの仕事。1本ずつ読みながら進み具合を出します。"""
+        from . import tally as tally_mod
+
+        def on_file(path, index, total, result):
+            if self._cancel.is_set():
+                raise Cancelled()
+            row = FileRow(name=path.name, ok=bool(result and result.taken),
+                          report_date=(result.date if result else ""),
+                          rows=(result.rows if result else 0),
+                          error=(result.skipped if result else "読めませんでした"),
+                          verify=(result.kind if result else ""),
+                          verify_ok=bool(result and result.taken))
+            with self._lock:
+                job.files.append(row)
+                job.done = index
+                job.current = path.name
+
+        try:
+            found = tally_mod.build(sources, on_file=on_file)
+            path = tally_mod.write_csv(found, job.out_dir) if found.rows else None
+            with self._lock:
+                job.tally_rows = len(found.rows)
+                job.tally_path = str(path) if path else ""
+                job.tally_message = found.summary()
+                job.written = 1 if path else 0
+                job.state = DONE
+                job.phase = PHASE_END
+                job.message = found.summary() + (
+                    "" if path else " ── CSVは書いていません")
+            for name, why in found.errors:
+                with self._lock:
+                    job.files.append(FileRow(name=name, ok=False, error=why))
+            log.info("機側データ集計 おわり id=%s %s → %s",
+                     job.id, found.summary(), job.tally_path or "(書かず)")
+        except Cancelled:
+            with self._lock:
+                job.state = STOPPED
+                job.phase = PHASE_END
+                job.message = (f"中止しました({job.done}/{job.total} 本まで"
+                               "読みました。CSVは書いていません)")
+            log.info("機側データ集計 中止 id=%s", job.id)
+        except Exception as exc:                  # noqa: BLE001 - 画面へ出す
+            with self._lock:
+                job.state = FAILED
+                job.phase = PHASE_END
+                job.error = str(exc)
+                job.message = "機側データ集計を作れませんでした"
+            log.exception("機側データ集計で失敗しました id=%s", job.id)
+        finally:
+            with self._lock:
+                job.finished_at = time.time()
+                job.current = ""
 
     def _tally(self, books: list[Path], job: Job, dry_run: bool) -> None:
         """VBAと同じ転記を1本のCSVに出す(`converter/tally.py`)。

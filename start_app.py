@@ -203,7 +203,7 @@ def start(*, open_browser_flag: bool = True) -> int:
 
         handover.mark_stage("接続を確認中", "connect")
         user_settings.apply_to_vendor(user_settings.load())
-        intake.INTAKE.clear()                     # 前回の受け取りは持ち越さない
+        intake.clear_all()                        # 前回の受け取りは持ち越さない
 
         application = app_package.create_app(token=token, port=srv.port)
         application.shutdown_hook = srv.request_stop
@@ -227,7 +227,7 @@ def start(*, open_browser_flag: bool = True) -> int:
         return EXIT_ENV
     finally:
         launch_guard.remove_lock()
-        intake.INTAKE.clear()
+        intake.clear_all()
         log.info("片づけました")
     return EXIT_OK
 

@@ -16,6 +16,9 @@ bp = Blueprint("job")
 @bp.post("/api/job/start")
 def start(request: Request) -> Response:
     payload = request.json()
+    if str(payload.get("tab", "convert")) == "tally":
+        return _start_tally(payload)
+
     source = str(payload.get("source", "intake"))
     dry_run = bool(payload.get("dry_run", False))
     tally = bool(payload.get("tally", False))
@@ -32,6 +35,21 @@ def start(request: Request) -> Response:
     try:
         snapshot = jobs.RUNNER.start(books, settings, dry_run=dry_run,
                                      tally=tally)
+    except (ValueError, RuntimeError) as exc:
+        return refuse("始められません", str(exc), status=400)
+    return json_response({"ok": True, "job": snapshot})
+
+
+def _start_tally(payload: dict) -> Response:
+    """機側データ集計タブ。**変換はしません**(4本組CSVは出ません)。"""
+    settings = user_settings.load()
+    if not settings.output_dir:
+        return refuse("設定を確かめてください",
+                      "出力先フォルダが未設定です(設定部で指定してください)",
+                      status=400)
+    sources = intake.get(intake.TALLY).files()
+    try:
+        snapshot = jobs.RUNNER.start_tally(sources, settings)
     except (ValueError, RuntimeError) as exc:
         return refuse("始められません", str(exc), status=400)
     return json_response({"ok": True, "job": snapshot})

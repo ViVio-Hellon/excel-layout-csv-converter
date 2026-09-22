@@ -19,12 +19,13 @@ export function setBusy(value, { folderSource = false } = {}) {
     const el = document.getElementById(id);
     if (el) { el.disabled = disabled; }
   };
-  off("start", value);
-  off("save", value);
-  off("intake-clear", value);
+  ["start", "tally-start", "save", "intake-clear", "tally-intake-clear"]
+    .forEach((id) => off(id, value));
   FIELDS.forEach((id) => off(id, value));
   const cancel = document.getElementById("cancel");
   if (cancel) { cancel.hidden = !value; }
   const drop = document.getElementById("drop");
   if (drop) { drop.classList.toggle("off", value || folderSource); }
+  const tallyDrop = document.getElementById("tally-drop");
+  if (tallyDrop) { tallyDrop.classList.toggle("off", value); }
 }

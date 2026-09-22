@@ -1,11 +1,22 @@
 /*
-  views/input.js — 読ませるブックを渡す
+  views/input.js — 読ませるものを渡す
 
-  ドラッグで放り込むか、設定した入力フォルダをそのまま読みます。
-  フォルダごと放り込まれたら、中のブックを拾います。
+  受け取り場所は**タブごとに分かれています**。
+
+    変換タブ         .xlsx / .xlsm     日報のブック
+    機側データ集計   .xlsx / .xlsm / .csv
+
+  片方を片づけても、もう片方は残ります ── 「入れたはずのものが無い」を
+  作らないためです。
+
+  【なぜ中身を送るのか】
+  ブラウザは、放り込まれたファイルの**本当の場所を教えません**。安全上の
+  決まりで、社内アプリでも変えられません。渡されるのは中身だけなので、
+  いったんこの端末のローカル領域へ写してから、フォルダを指定したときと
+  同じ道で読みます(`converter/intake.py`)。
 
   **100本を超えたぶんは送りません。** サーバも断りますが、送ってから
-  断られるより、その場で言うほうが早い(サーバの上限が正)。
+  断られるより、その場で言うほうが早い(上限はサーバの値が正)。
 */
 import { api } from "../api.js";
 import * as progress from "../progress.js";
@@ -14,14 +25,29 @@ import { setBusy } from "../busy.js";
 
 const $ = (id) => document.getElementById(id);
 
+const ZONES = {
+  convert: {
+    kind: "convert", drop: "drop", picker: "picker", clear: "intake-clear",
+    count: "intake-count", list: "intake-list", msg: "intake-msg",
+    accept: /\.(xlsx|xlsm)$/i, label: ".xlsx / .xlsm",
+  },
+  tally: {
+    kind: "tally", drop: "tally-drop", picker: "tally-picker",
+    clear: "tally-intake-clear", count: "tally-intake-count",
+    list: "tally-intake-list", msg: "tally-intake-msg",
+    accept: /\.(xlsx|xlsm|csv)$/i, label: ".xlsx / .xlsm / .csv",
+  },
+};
+
 export function folderSource() {
-  return document.querySelector("input[name=source]:checked").value === "folder";
+  const picked = document.querySelector("input[name=source]:checked");
+  return !!picked && picked.value === "folder";
 }
 
-function filterBooks(files) {
+function filterFiles(zone, files) {
   return files.filter((file) => {
-    const name = (file.name || "").toLowerCase();
-    return /\.(xlsx|xlsm)$/.test(name) && name.indexOf("~$") !== 0;
+    const name = file.name || "";
+    return zone.accept.test(name) && name.indexOf("~$") !== 0;
   });
 }
 
@@ -52,8 +78,7 @@ function walk(entry) {
 function collect(transfer) {
   const items = transfer.items;
   if (!items || !items.length || !items[0].webkitGetAsEntry) {
-    return Promise.resolve(filterBooks(
-      Array.prototype.slice.call(transfer.files || [])));
+    return Promise.resolve(Array.prototype.slice.call(transfer.files || []));
   }
   const entries = [];
   for (let i = 0; i < items.length; i += 1) {
@@ -61,28 +86,30 @@ function collect(transfer) {
     if (entry) { entries.push(entry); }
   }
   return Promise.all(entries.map(walk)).then((lists) =>
-    filterBooks([].concat.apply([], lists)));
+    [].concat.apply([], lists));
 }
 
-export function refresh() {
-  return api("/api/input").then((result) => {
+export function refresh(kind) {
+  const zone = ZONES[kind];
+  return api("/api/input?kind=" + zone.kind).then((result) => {
     if (!result.ok) { return; }
     const limit = result.data.limit || window.APP.max_files;
-    $("intake-count").textContent = result.data.count + " / " + limit + " 本";
-    $("intake-count").className = "count" + (result.data.count >= limit ? " full" : "");
-    $("intake-list").innerHTML = "";
+    $(zone.count).textContent = result.data.count + " / " + limit + " 本";
+    $(zone.count).className = "count" + (result.data.count >= limit ? " full" : "");
+    $(zone.list).innerHTML = "";
     (result.data.names || []).forEach((name) => {
       const chip = document.createElement("span");
       chip.className = "chip";
       chip.textContent = name;
-      $("intake-list").appendChild(chip);
+      $(zone.list).appendChild(chip);
     });
   });
 }
 
-async function receive(files) {
+async function receive(zone, files) {
+  files = filterFiles(zone, files);
   if (!files.length) {
-    return toast.bad("intake-msg", "読めるブックがありませんでした(.xlsx / .xlsm)");
+    return toast.bad(zone.msg, "読めるものがありませんでした(" + zone.label + ")");
   }
   const limit = window.APP.max_files || 100;
   let extra = 0;
@@ -94,7 +121,7 @@ async function receive(files) {
 
   setBusy(true, { folderSource: folderSource() });
   progress.show("受け取り", 0, files.length, "");
-  await api("/api/input/begin", { json: {} });
+  await api("/api/input/begin", { json: { kind: zone.kind } });
 
   const refused = [];
   for (let i = 0; i < files.length; i += 1) {
@@ -103,7 +130,10 @@ async function receive(files) {
     try {
       const result = await api("/api/input/add", {
         method: "POST",
-        headers: { "X-Filename": encodeURIComponent(file.name) },
+        headers: {
+          "X-Filename": encodeURIComponent(file.name),
+          "X-Intake": zone.kind,
+        },
         body: file,
       });
       if (result.data && result.data.ok === false && result.data.message) {
@@ -115,26 +145,20 @@ async function receive(files) {
   }
   progress.hide();
   setBusy(false, { folderSource: folderSource() });
-  await refresh();
+  await refresh(zone.kind);
 
   let message = files.length + " 本を受け取りました";
   if (extra) {
     message += " ── " + limit + " 本を超えたぶん(" + extra + " 本)は受け取っていません";
   }
   if (refused.length) { message += " ／ " + refused.join(" ／ "); }
-  toast.say("intake-msg", message, (extra || refused.length) ? "bad" : "ok");
+  toast.say(zone.msg, message, (extra || refused.length) ? "bad" : "ok");
 }
 
-export function wire() {
-  const drop = $("drop");
-  const picker = $("picker");
-
-  document.querySelectorAll("input[name=source]").forEach((radio) => {
-    radio.addEventListener("change", () => {
-      drop.classList.toggle("off", folderSource());
-      $("folder-line").hidden = !folderSource();
-    });
-  });
+function wireZone(zone) {
+  const drop = $(zone.drop);
+  const picker = $(zone.picker);
+  if (!drop) { return; }
 
   ["dragenter", "dragover"].forEach((name) => {
     drop.addEventListener(name, (event) => {
@@ -145,14 +169,10 @@ export function wire() {
   ["dragleave", "drop"].forEach((name) => {
     drop.addEventListener(name, () => drop.classList.remove("over"));
   });
-  // 画面の外で落として、ブラウザがブックを開いてしまうのを防ぐ
-  window.addEventListener("dragover", (e) => e.preventDefault());
-  window.addEventListener("drop", (e) => e.preventDefault());
-
   drop.addEventListener("drop", (event) => {
     event.preventDefault();
     if (drop.classList.contains("off")) { return; }
-    collect(event.dataTransfer).then(receive);
+    collect(event.dataTransfer).then((files) => receive(zone, files));
   });
   drop.addEventListener("click", () => {
     if (!drop.classList.contains("off")) { picker.click(); }
@@ -161,17 +181,30 @@ export function wire() {
     if (event.key === "Enter" || event.key === " ") { picker.click(); }
   });
   picker.addEventListener("change", () => {
-    receive(filterBooks(Array.prototype.slice.call(picker.files)));
+    receive(zone, Array.prototype.slice.call(picker.files));
     picker.value = "";
   });
-
-  $("intake-clear").addEventListener("click", () => {
-    api("/api/input/clear", { json: {} }).then(() => {
-      refresh();
-      toast.ok("intake-msg", "受け取ったぶんを消しました");
+  $(zone.clear).addEventListener("click", () => {
+    api("/api/input/clear", { json: { kind: zone.kind } }).then(() => {
+      refresh(zone.kind);
+      toast.ok(zone.msg, "受け取ったぶんを消しました");
     });
   });
+}
 
+export function wire() {
+  // 画面の外で落として、ブラウザがブックを開いてしまうのを防ぐ
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("drop", (e) => e.preventDefault());
+
+  Object.keys(ZONES).forEach((kind) => wireZone(ZONES[kind]));
+
+  document.querySelectorAll("input[name=source]").forEach((radio) => {
+    radio.addEventListener("change", () => {
+      $("drop").classList.toggle("off", folderSource());
+      $("folder-line").hidden = !folderSource();
+    });
+  });
   $("scan").addEventListener("click", () => {
     api("/api/input/scan", { json: { folder: $("input_dir").value } })
       .then((result) => {
@@ -180,5 +213,5 @@ export function wire() {
       });
   });
 
-  return refresh();
+  return Promise.all([refresh("convert"), refresh("tally")]);
 }

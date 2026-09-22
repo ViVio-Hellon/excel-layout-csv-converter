@@ -10,6 +10,15 @@ VBA(`UF.CommandButton1_Click` → `機側データ集計`)が Excel のシート
 
 **グラフは作りません**(VBA側のおまけ機能)。読み取りと転記だけです。
 
+【CSVも受けます】
+ブック(.xlsx / .xlsm)のほかに、CSVも読めます。中身を見て2通りに分けます。
+
+    1行目がこの見出しと同じ   … **前に出した集計**。そのまま積み増します
+    A1 が「集計」            … シートをCSVで保存したもの。ブックと同じに読みます
+
+どちらでもなければ**断ります** ── 中身の分からないCSVを黙って混ぜると、
+できあがった表が何なのか誰にも言えなくなります。
+
 【停止3枠(Stop3)のみ】
 VBA はチェックボックスで停止2枠/3枠を選べますが、実物のブック(2026年の
 機側)は3枠で、`docs/座標表.md` の座標と**完全に一致**していました。
@@ -90,7 +99,7 @@ CHECK_CELLS: tuple[tuple[str, str], ...] = (
 
 @dataclass
 class SheetResult:
-    """シート1枚ぶんの結果。"""
+    """入力1つぶん(シート1枚 / CSV1本)の結果。"""
 
     file: str = ""
     sheet: str = ""
@@ -98,6 +107,7 @@ class SheetResult:
     rows: int = 0
     last_row: int = 0
     skipped: str = ""          # 拾わなかった理由(空なら拾った)
+    kind: str = "シート"        # シート / CSV(シート) / CSV(集計)
 
     @property
     def taken(self) -> bool:
@@ -118,11 +128,15 @@ class Tally:
 
     @property
     def dates(self) -> list[str]:
-        """拾った日付を、出てきた順に(重複なし)。"""
+        """拾った日付を、出てきた順に(重複なし)。
+
+        **行から採ります** ── 前に出した集計CSVを積み増したときは、
+        1本の中に何日ぶんも入っているためです。
+        """
         found: list[str] = []
-        for sheet in self.taken:
-            if sheet.date and sheet.date not in found:
-                found.append(sheet.date)
+        for row in self.rows:
+            if row and row[0] and row[0] not in found:
+                found.append(row[0])
         return found
 
     def summary(self) -> str:
@@ -221,6 +235,145 @@ def take_sheet(sheet, *, file_name: str = "") -> tuple[list[list[str]], SheetRes
 
 
 # ------------------------------------------------------------------
+# CSV を読む
+# ------------------------------------------------------------------
+#: CSVの文字コード。**この順に試します** ── Excelの「CSV(コンマ区切り)」は
+#: 日本語Windowsでは CP932 で保存されます
+ENCODINGS = ("utf-8-sig", "cp932", "utf-8")
+
+
+def _column_name(index: int) -> str:
+    """0 → A、25 → Z、26 → AA。"""
+    name = ""
+    index += 1
+    while index:
+        index, rest = divmod(index - 1, 26)
+        name = chr(65 + rest) + name
+    return name
+
+
+def read_grid(path) -> list[list[str]]:
+    """CSVを表として読む。**読めた文字コードで通します。**"""
+    last: Exception | None = None
+    for encoding in ENCODINGS:
+        try:
+            text = Path(path).read_text(encoding=encoding)
+        except (UnicodeDecodeError, LookupError) as exc:
+            last = exc
+            continue
+        return [[cell.strip() for cell in row]
+                for row in csv.reader(text.splitlines())]
+    raise ValueError(f"文字コードが読めません({last})")
+
+
+def grid_rows(grid: list[list[str]]) -> dict:
+    """表を `{行番号: {"D": "値"}}` にする(シートと同じ形)。"""
+    rows: dict[int, dict[str, str]] = {}
+    for number, line in enumerate(grid, start=1):
+        values = {_column_name(i): cell for i, cell in enumerate(line) if cell}
+        if values:
+            rows[number] = values
+    return rows
+
+
+class _Grid:
+    """CSVを、シートと同じ顔つきで扱えるようにする小さな入れ物。"""
+
+    def __init__(self, name: str, rows: dict) -> None:
+        self.name = name
+        self._rows = rows
+
+    @property
+    def rows(self) -> dict:
+        return self._rows
+
+    def cell(self, ref: str) -> str:
+        """`"E1"` の形で1つ取る(シートの `cell()` と同じ呼び方)。"""
+        column = "".join(char for char in ref if char.isalpha())
+        number = "".join(char for char in ref if char.isdigit())
+        if not number:
+            return ""
+        return self._rows.get(int(number), {}).get(column, "")
+
+
+def take_csv(path) -> tuple[list[list[str]], SheetResult]:
+    """CSV1本から行を拾う。**中身を見て2通りに分けます。**"""
+    path = Path(path)
+    result = SheetResult(file=path.name, sheet=path.name, kind="CSV")
+    try:
+        grid = read_grid(path)
+    except (ValueError, OSError) as exc:
+        result.skipped = str(exc)
+        return [], result
+    if not grid:
+        result.skipped = "空のCSVです"
+        return [], result
+
+    head = [cell for cell in grid[0]]
+    if head[:len(HEADERS)] == list(HEADERS):
+        return _take_tallied(grid, result)
+
+    if (grid[0][0] if grid[0] else "") == MARK_VALUE:
+        return _take_grid_sheet(path, grid, result)
+
+    result.skipped = ("中身が分かりません(1行目が集計の見出しでも、"
+                      f"A1が「{MARK_VALUE}」でもありません)")
+    return [], result
+
+
+def _take_tallied(grid: list[list[str]], result: SheetResult):
+    """**前に出した集計**。そのまま積み増します(VBAの追記と同じ)。"""
+    result.kind = "CSV(集計)"
+    width = len(HEADERS)
+    rows: list[list[str]] = []
+    for line in grid[1:]:
+        if not any(line):
+            continue
+        if len(line) > width:
+            result.skipped = (f"列が多すぎます({len(line)} 列。"
+                              f"集計は {width} 列です)")
+            return [], result
+        rows.append(list(line) + [""] * (width - len(line)))
+    result.rows = len(rows)
+    result.date = rows[0][0] if rows else ""
+    return rows, result
+
+
+def _take_grid_sheet(path: Path, grid: list[list[str]], result: SheetResult):
+    """**シートをCSVで保存したもの**。ブックと同じに読みます。
+
+    日付はシート名から採れないので、**作業日の欄(E1)**を使います ──
+    実物のブックでは、シート名の日付と同じ文字が入っています。
+    無ければファイル名で代えます。
+    """
+    result.kind = "CSV(シート)"
+    rows = grid_rows(grid)
+    sheet = _Grid(path.name, rows)
+    problem = layout_problem(sheet)
+    if problem:
+        result.skipped = problem
+        return [], result
+
+    result.date = sheet.cell("E1") or path.stem
+    result.last_row = last_row_of(rows)
+    taken: list[list[str]] = []
+    previous_lot = ""
+    for number in range(FIRST_ROW, result.last_row + 1):
+        values = rows.get(number, {})
+        if not wanted(values):
+            continue
+        line = [result.date] + [values.get(col, "") for _name, col in COLUMNS]
+        current = values.get("A", "")
+        if current:
+            previous_lot = current
+        if not line[LOT] and previous_lot:
+            line[LOT] = previous_lot
+        taken.append(line)
+    result.rows = len(taken)
+    return taken, result
+
+
+# ------------------------------------------------------------------
 # 空欄を埋める ── **順番が結果を変えます**
 # ------------------------------------------------------------------
 def fill_down(rows: list[list[str]], index: int) -> None:
@@ -281,6 +434,13 @@ def build(paths, *, on_file=None) -> Tally:
     tally = Tally()
     paths = [Path(p) for p in paths]
     for index, path in enumerate(paths, start=1):
+        if path.suffix.lower() == ".csv":
+            rows, result = take_csv(path)
+            tally.rows.extend(rows)
+            tally.sheets.append(result)
+            if on_file:
+                on_file(path, index, len(paths), result)
+            continue
         try:
             sheets = read_sheets(path)
         except (NotXlsx, OSError) as exc:

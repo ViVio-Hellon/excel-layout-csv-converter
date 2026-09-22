@@ -9,6 +9,7 @@
 import { api, reason } from "./api.js";
 import { markClosed, startHeartbeat } from "./health.js";
 import * as screen from "./screen.js";
+import * as tabs from "./tabs.js";
 import * as toast from "./toast.js";
 import * as settings from "./views/settings.js";
 import * as input from "./views/input.js";
@@ -19,9 +20,14 @@ const $ = (id) => document.getElementById(id);
 async function boot() {
   if (!await screen.claim()) { return; }        // 断られた画面はここで終わり
 
-  $("limit-text").textContent = window.APP.max_files;
-  $("intake-count").textContent = "0 / " + window.APP.max_files + " 本";
+  document.querySelectorAll(".limit-text").forEach((el) => {
+    el.textContent = window.APP.max_files;
+  });
+  ["intake-count", "tally-intake-count"].forEach((id) => {
+    $(id).textContent = "0 / " + window.APP.max_files + " 本";
+  });
 
+  tabs.wire();
   wireShell();
   await Promise.all([settings.wire(), input.wire(), job.wire()]);
   startHeartbeat();

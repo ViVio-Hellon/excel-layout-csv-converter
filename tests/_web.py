@@ -46,8 +46,10 @@ class WebCase(unittest.TestCase):
 
         screen_lock.LOCK = screen_lock.ScreenLock()
         jobs.RUNNER = jobs.Runner()
-        intake.INTAKE = intake.Intake()
-        self.addCleanup(intake.INTAKE.clear)
+        # 受け取り置き場はタブごとに2つ(変換 / 機側データ集計)
+        intake.INTAKE = intake.Intake(intake.CONVERT, intake.SUFFIXES)
+        intake.TALLY_INTAKE = intake.Intake(intake.TALLY, intake.TALLY_SUFFIXES)
+        self.addCleanup(intake.clear_all)
 
         import app as app_package
         self.app = app_package.create_app(token=TOKEN)
@@ -66,6 +68,7 @@ class WebCase(unittest.TestCase):
         from converter import screen_lock
         from server import Request
 
+        path, _sep, query = path.partition("?")
         raw = json.dumps(payload).encode("utf-8") if payload is not None else body
         head = {"content-type": "application/json", "host": "127.0.0.1"}
         if token:
@@ -73,8 +76,11 @@ class WebCase(unittest.TestCase):
         if screen_id:
             head[screen_lock.HEADER.lower()] = screen_id
         head.update({k.lower(): v for k, v in (headers or {}).items()})
+        from urllib.parse import parse_qs
+
         response = self.app.dispatch(Request(
-            method=method, path=path, query={}, body=raw, headers=head))
+            method=method, path=path, query=parse_qs(query), body=raw,
+            headers=head))
         try:
             return response.status, json.loads(response.body.decode("utf-8"))
         except ValueError:

@@ -14,6 +14,49 @@ from converter import app_config, jobs             # noqa: E402
 from tests._web import WebCase                     # noqa: E402
 
 
+class TallyTabTests(WebCase):
+    """機側データ集計タブ ── **変換はしません**(4本組CSVは出ません)。"""
+
+    def _put(self, screen_id: str, count: int = 2) -> None:
+        from converter import intake
+
+        folder = self.books(count)
+        intake.TALLY_INTAKE.begin()
+        for book in sorted(folder.glob("*.xlsx")):
+            intake.TALLY_INTAKE.add(book.name, book.read_bytes())
+
+    def test_集計だけ出す(self) -> None:
+        screen_id = self.claim()
+        out = self.tmp / "out"
+        self.settings(screen_id, output_dir=str(out))
+        self._put(screen_id)
+        status, data = self.request("POST", "/api/job/start", {"tab": "tally"},
+                                    screen_id=screen_id)
+        self.assertEqual(status, 200, data)
+        job = self.wait_for_job()
+        self.assertEqual(job["kind"], jobs.KIND_TALLY)
+        self.assertEqual(job["state"], jobs.DONE)
+        # 合成ブックは日報用(A1が無い)なので拾う行はありませんが、
+        # **4本組CSVが出ていないこと**がここの見どころです
+        self.assertFalse(list(out.rglob("集計_*.csv")))
+
+    def test_出力先が無ければ始めない(self) -> None:
+        screen_id = self.claim()
+        self._put(screen_id)
+        status, data = self.request("POST", "/api/job/start", {"tab": "tally"},
+                                    screen_id=screen_id)
+        self.assertEqual(status, 400)
+        self.assertIn("出力先", data["detail"])
+
+    def test_読む相手が無ければ始めない(self) -> None:
+        screen_id = self.claim()
+        self.settings(screen_id, output_dir=str(self.tmp / "out"))
+        status, data = self.request("POST", "/api/job/start", {"tab": "tally"},
+                                    screen_id=screen_id)
+        self.assertEqual(status, 400)
+        self.assertIn("読む相手", data["detail"])
+
+
 class JobTests(WebCase):
     def _start(self, count: int = 2, dry_run: bool = False):
         screen_id = self.claim()

@@ -29,16 +29,26 @@ from .logging_utils import get_logger
 
 log = get_logger("intake")
 
-#: 読める拡張子。`converter.run.SUFFIXES` と同じもの
+#: 変換が読める拡張子。`converter.run.SUFFIXES` と同じもの
 SUFFIXES = (".xlsx", ".xlsm")
+
+#: 機側データ集計が読める拡張子。**CSVも受けます**
+#: (変換で出したCSVや、シートをCSVで保存したものを積み増せるように)
+TALLY_SUFFIXES = (".xlsx", ".xlsm", ".csv")
 
 #: ファイル名から落とす字。**区切り文字は落とします** ── 受け取った名前で
 #: 上の階層へ書かれないようにするため
 _BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
-def folder() -> Path:
-    return app_config.local_dir("work") / "intake"
+#: 受け取り置き場の名前。**用途ごとに分けます** ── 変換用と集計用を同じ
+#: 場所に置くと、片方を片づけたときにもう片方まで消えます
+CONVERT = "convert"
+TALLY = "tally"
+
+
+def folder(kind: str = CONVERT) -> Path:
+    return app_config.local_dir("work") / "intake" / kind
 
 
 def safe_name(name: str) -> str:
@@ -54,25 +64,36 @@ def safe_name(name: str) -> str:
 
 
 class Intake:
-    """放り込まれたぶんを1組として持つ。"""
+    """放り込まれたぶんを1組として持つ。
 
-    def __init__(self) -> None:
+    `kind` ごとに置き場所が分かれます(変換用 / 集計用)。タブを切り替えても
+    持ち越せるよう、**別々に覚えます**。
+    """
+
+    def __init__(self, kind: str = CONVERT, suffixes=SUFFIXES) -> None:
+        self.kind = kind
+        self.suffixes = tuple(suffixes)
         self._lock = threading.Lock()
         self._names: list[str] = []
+
+    @property
+    def folder(self) -> Path:
+        return folder(self.kind)
 
     # -- 受け取る ----------------------------------------------------
     def begin(self) -> Path:
         """新しく受け取り始める。**前の組は消します**(混ざらないように)。"""
         self.clear()
-        target = folder()
+        target = self.folder
         target.mkdir(parents=True, exist_ok=True)
         return target
 
     def add(self, name: str, data: bytes) -> str:
         """1本受け取る。**上限と拡張子と大きさはここで断ります。**"""
         clean = safe_name(name)
-        if Path(clean).suffix.lower() not in SUFFIXES:
-            raise ValueError(f"{clean}: 読めるのは .xlsx と .xlsm です")
+        if Path(clean).suffix.lower() not in self.suffixes:
+            raise ValueError(f"{clean}: 読めるのは "
+                             + " と ".join(self.suffixes) + " です")
         if clean.startswith("~$"):
             raise ValueError(f"{clean}: Excelが開いている間の作業ファイルです")
         limit = app_config.max_files()
@@ -83,7 +104,7 @@ class Intake:
                 raise ValueError(
                     f"{clean}: 大きすぎます"
                     f"(上限 {app_config.max_file_bytes() // 1024 // 1024}MB)")
-            target = folder()
+            target = self.folder
             target.mkdir(parents=True, exist_ok=True)
             path = target / clean
             stem, suffix = path.stem, path.suffix
@@ -99,7 +120,7 @@ class Intake:
     def files(self) -> list[Path]:
         """受け取った順ではなく**名前順**。フォルダ指定と同じ並びにします。"""
         with self._lock:
-            target = folder()
+            target = self.folder
             return sorted((target / n for n in self._names if (target / n).exists()),
                           key=lambda p: p.name)
 
@@ -114,12 +135,30 @@ class Intake:
         with self._lock:
             self._names = []
         try:
-            shutil.rmtree(folder())
+            shutil.rmtree(self.folder)
         except FileNotFoundError:
             pass
         except OSError as exc:                    # noqa: BLE001 - 続けてよい
             log.warning("受け取り置き場を消せませんでした: %s", exc)
 
 
-#: アプリで1つ
-INTAKE = Intake()
+#: 変換タブの受け取り(.xlsx / .xlsm)
+INTAKE = Intake(CONVERT, SUFFIXES)
+
+#: 機側データ集計タブの受け取り(.xlsx / .xlsm / .csv)
+TALLY_INTAKE = Intake(TALLY, TALLY_SUFFIXES)
+
+
+def get(kind: str) -> Intake:
+    """用途から受け取り置き場を選ぶ。**知らない名前は断ります。**"""
+    if kind == TALLY:
+        return TALLY_INTAKE
+    if kind in ("", CONVERT):
+        return INTAKE
+    raise ValueError(f"知らない受け取り先です: {kind!r}")
+
+
+def clear_all() -> None:
+    """両方片づける(起動時と終了時に呼びます)。"""
+    INTAKE.clear()
+    TALLY_INTAKE.clear()

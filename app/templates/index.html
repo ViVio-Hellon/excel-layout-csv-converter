@@ -1,7 +1,13 @@
 <!--
   変換の画面(中身)
 
-  外枠は `base.html`。ここは設定部・入力・変換・結果の4つだけです。
+  外枠は `base.html`。設定部は共通で、その下を**タブで2つに分けて**います。
+
+    変換             … 1日・1ラインごとに4本組のCSV(日報管理ツールと同じ)
+    機側データ集計    … VBAと同じ転記を1本のCSVに(Excelでも、前に出したCSVでも)
+
+  進捗と結果は**1か所**です ── 走るのは一度に1つだけなので、どちらのタブから
+  始めても同じ場所に出ます。
 
   **この画面は1枚しか開けません。** 2枚開けると同じ作業状態を奪い合う
   ので、開くこと自体をお断りします。判定はサーバ
@@ -58,61 +64,129 @@
     </div>
   </section>
 
-  <!-- 入力 ------------------------------------------------------- -->
-  <section class="card">
-    <div class="card-head">
-      <h2>読ませるブック</h2>
-      <p>ドラッグで放り込むか、上の入力フォルダをそのまま読みます。
-         一度に <b id="limit-text">100</b> 本まで。</p>
-    </div>
 
-    <div class="choices">
-      <label><input type="radio" name="source" value="intake" checked>
-        ドラッグで放り込む</label>
-      <label><input type="radio" name="source" value="folder">
-        入力フォルダをそのまま読む</label>
-    </div>
+  <!-- タブ ------------------------------------------------------ -->
+  <nav class="tabs" role="tablist" aria-label="やること">
+    <button class="tab on" id="tab-convert" data-tab="convert"
+            role="tab" aria-selected="true">変換</button>
+    <button class="tab" id="tab-tally" data-tab="tally"
+            role="tab" aria-selected="false">機側データ集計</button>
+  </nav>
 
-    <div class="drop" id="drop" tabindex="0">
-      <div class="drop-inner">
-        <div class="drop-mark">＋</div>
-        <div><b>ここへドラッグ</b></div>
-        <div class="drop-sub">.xlsx / .xlsm ── フォルダごと放り込めます。
-          クリックで選ぶこともできます。</div>
+  <!-- 変換タブ --------------------------------------------------- -->
+  <div class="panel" id="panel-convert" role="tabpanel">
+
+    <section class="card">
+      <div class="card-head">
+        <h2>読ませるブック</h2>
+        <p>ドラッグで放り込むか、上の入力フォルダをそのまま読みます。
+           一度に <b class="limit-text">100</b> 本まで。</p>
       </div>
-      <input type="file" id="picker" multiple accept=".xlsx,.xlsm" hidden>
-    </div>
 
-    <div class="row">
-      <span class="count" id="intake-count">0 / 100 本</span>
-      <button id="intake-clear" class="ghost">受け取ったぶんを消す</button>
-      <span class="msg" id="intake-msg"></span>
-    </div>
-    <div class="chips" id="intake-list"></div>
+      <div class="choices">
+        <label><input type="radio" name="source" value="intake" checked>
+          ドラッグで放り込む</label>
+        <label><input type="radio" name="source" value="folder">
+          入力フォルダをそのまま読む</label>
+      </div>
 
-    <div class="folder-line" id="folder-line" hidden>
-      <button id="scan">入力フォルダを数える</button>
-      <span class="msg" id="scan-msg"></span>
-    </div>
-  </section>
+      <div class="drop" id="drop" tabindex="0">
+        <div class="drop-inner">
+          <div class="drop-mark">＋</div>
+          <div><b>ここへドラッグ</b></div>
+          <div class="drop-sub">.xlsx / .xlsm ── フォルダごと放り込めます。
+            クリックで選ぶこともできます。</div>
+        </div>
+        <input type="file" id="picker" multiple accept=".xlsx,.xlsm" hidden>
+      </div>
 
-  <!-- 実行 ------------------------------------------------------- -->
-  <section class="card">
+      <div class="row">
+        <span class="count" id="intake-count">0 / 100 本</span>
+        <button id="intake-clear" class="ghost">受け取ったぶんを消す</button>
+        <span class="msg" id="intake-msg"></span>
+      </div>
+      <div class="chips" id="intake-list"></div>
+
+      <div class="folder-line" id="folder-line" hidden>
+        <button id="scan">入力フォルダを数える</button>
+        <span class="msg" id="scan-msg"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>変換</h2>
+        <p>1日・1ラインごとに4本のCSVと、列の説明を書きます。
+           <b>ブラウザへダウンロードはしません</b> ── 出力先フォルダへ直接書きます。</p>
+      </div>
+
+      <div class="row">
+        <button class="primary big" id="start">変換開始</button>
+        <label class="check"><input type="checkbox" id="dry_run">
+          確かめるだけ(CSVを書きません)</label>
+      </div>
+    </section>
+  </div>
+
+  <!-- 機側データ集計タブ ------------------------------------------ -->
+  <div class="panel" id="panel-tally" role="tabpanel" hidden>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>読ませるもの</h2>
+        <p>Excelのブックでも、CSVでも受けます。一度に
+           <b class="limit-text">100</b> 本まで。</p>
+      </div>
+
+      <div class="drop" id="tally-drop" tabindex="0">
+        <div class="drop-inner">
+          <div class="drop-mark">＋</div>
+          <div><b>ここへドラッグ</b></div>
+          <div class="drop-sub">.xlsx / .xlsm / .csv ── フォルダごと放り込めます。
+            クリックで選ぶこともできます。</div>
+        </div>
+        <input type="file" id="tally-picker" multiple accept=".xlsx,.xlsm,.csv" hidden>
+      </div>
+
+      <div class="row">
+        <span class="count" id="tally-intake-count">0 / 100 本</span>
+        <button id="tally-intake-clear" class="ghost">受け取ったぶんを消す</button>
+        <span class="msg" id="tally-intake-msg"></span>
+      </div>
+      <div class="chips" id="tally-intake-list"></div>
+
+      <div class="notice" id="tally-kinds">
+        受けるCSVは2通りです。<b>前に出した集計</b>(1行目がその見出し)は
+        そのまま積み増し、<b>シートをCSVで保存したもの</b>(A1が「集計」)は
+        ブックと同じに読みます。どちらでもないCSVは、理由を出して飛ばします。
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>機側データ集計</h2>
+        <p>VBAと同じ拾い方・同じ並びで、読ませたぶん<b>全部を1本のCSV</b>に
+           転記します。<b>変換(4本組のCSV)はしません。</b>
+           対象は停止3枠のブックで、シート名に <code>_機側</code> を含むものだけです。</p>
+      </div>
+
+      <div class="row">
+        <button class="primary big" id="tally-start">集計する</button>
+        <span class="msg">出す先は設定部の「出力先フォルダ」です。</span>
+      </div>
+    </section>
+  </div>
+
+  <!-- 進捗と結果(共通) -------------------------------------------- -->
+  <section class="card" id="running-card">
     <div class="card-head">
-      <h2>変換</h2>
-      <p>1日・1ラインごとに4本のCSVと、列の説明を書きます。
-         <b>ブラウザへダウンロードはしません</b> ── 出力先フォルダへ直接書きます。<br>
-         「機側データ集計」を付けると、VBAと同じ拾い方・同じ並びで
-         <b>読ませたぶん全部を1本のCSV</b>にも出します(停止3枠のブックのみ)。</p>
+      <h2 id="running-title">進み具合</h2>
+      <p>走るのは一度に1つだけです。どちらのタブから始めても、ここに出ます。</p>
     </div>
 
     <div class="row">
-      <button class="primary big" id="start">変換開始</button>
       <button id="cancel" class="danger" hidden>中止</button>
-      <label class="check"><input type="checkbox" id="dry_run">
-        確かめるだけ(CSVを書きません)</label>
-      <label class="check"><input type="checkbox" id="tally">
-        機側データ集計も出す(VBAと同じ転記を1本のCSVに)</label>
+      <span class="msg" id="idle-msg">まだ動いていません。</span>
     </div>
 
     <div class="progress" id="progress" hidden>
@@ -134,14 +208,14 @@
   <section class="card" id="result-card" hidden>
     <div class="card-head">
       <h2>結果</h2>
-      <p>○ 読めて数も合った ／ ! 読めたが数が合わない(座標がずれている
-         おそれがあります) ／ × 読めなかった</p>
+      <p id="result-note">○ 読めて数も合った ／ ! 読めたが数が合わない(座標が
+         ずれているおそれがあります) ／ × 読めなかった</p>
     </div>
 
     <div class="tiles" id="tiles"></div>
     <div class="table-wrap">
       <table id="result">
-        <thead><tr>
+        <thead><tr id="result-head">
           <th></th><th>ファイル</th><th>日付</th><th>ライン</th>
           <th class="num">ページ</th><th class="num">行</th><th>突き合わせ</th>
         </tr></thead>

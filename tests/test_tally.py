@@ -208,6 +208,68 @@ class 積む順(Base):
         self.assertEqual(len(books.read_sheets(path)), 1)
 
 
+class CSVを読む(Base):
+    """ブックだけでなくCSVも受けます。**中身を見て2通りに分けます。**"""
+
+    def csv(self, text: str, *, name: str = "何か.csv",
+            encoding: str = "utf-8-sig") -> Path:
+        path = self.tmp / name
+        path.write_text(text, encoding=encoding)
+        return path
+
+    def test_前に出した集計はそのまま積み増す(self) -> None:
+        first = tally.build([self.book({8: {"D": "L1", "L": "9"}})])
+        made = tally.write_csv(first, self.tmp / "out")
+        again = tally.build([made])
+        self.assertEqual(len(again.rows), 1)
+        self.assertEqual(again.rows[0][tally.LOT], "L1")
+        self.assertEqual(again.sheets[0].kind, "CSV(集計)")
+
+    def test_ブックと集計CSVを混ぜられる(self) -> None:
+        """VBAが集計シートへ**追記**していたのと同じ使い方です。"""
+        first = tally.build([self.book({8: {"D": "L1", "L": "9"}},
+                                       file="1.xlsx")])
+        made = tally.write_csv(first, self.tmp / "out")
+        book = self.book({8: {"D": "L2", "L": "9"}}, file="2.xlsx",
+                         name="2026年8月24日_機側")
+        both = tally.build([made, book])
+        self.assertEqual([r[tally.LOT] for r in both.rows], ["L1", "L2"])
+
+    def test_シートをCSVにしたものも読む(self) -> None:
+        """日付は**作業日の欄(E1)**から採ります(シート名が無いため)。"""
+        lines = [[""] * 44 for _ in range(9)]
+        lines[0][0] = "集計"
+        lines[0][4] = "2026年8月23日"
+        for ref, text in (("S", "内容"), ("T", "時間（分）"), ("U", "内容"),
+                          ("V", "時間（分）"), ("W", "内容"), ("X", "時間（分）"),
+                          ("AC", "作業時間（分）"), ("AE", "用途コード"),
+                          ("AF", "用途名"), ("AG", "納入先"), ("AH", "包装仕様NO")):
+            index = 0
+            for char in ref:
+                index = index * 26 + (ord(char) - 64)
+            lines[6][index - 1] = text
+        lines[7][3] = "L9"          # D8 = ロット№
+        lines[7][11] = "9"          # L8 = 終了時刻
+        text = "\n".join(",".join(cell for cell in line) for line in lines)
+        found = tally.build([self.csv(text, encoding="cp932")])
+        self.assertEqual(len(found.rows), 1)
+        self.assertEqual(found.rows[0][0], "2026年8月23日")
+        self.assertEqual(found.rows[0][tally.LOT], "L9")
+        self.assertEqual(found.sheets[0].kind, "CSV(シート)")
+
+    def test_中身の分からないCSVは断る(self) -> None:
+        """**黙って混ぜません。** 何の表か言えなくなります。"""
+        found = tally.build([self.csv("あ,い\n1,2\n")])
+        self.assertEqual(found.rows, [])
+        self.assertIn("中身が分かりません", found.sheets[0].skipped)
+
+    def test_列が多すぎる集計CSVは断る(self) -> None:
+        text = ",".join(tally.HEADERS) + "\n" + ",".join(["x"] * 30) + "\n"
+        found = tally.build([self.csv(text)])
+        self.assertEqual(found.rows, [])
+        self.assertIn("列が多すぎます", found.sheets[0].skipped)
+
+
 class 書き出し(Base):
     def test_見出しは23列でVBAと同じ(self) -> None:
         self.assertEqual(len(tally.HEADERS), 23)

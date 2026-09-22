@@ -7,6 +7,10 @@ r"""読ませるブックを受ける ── ドラッグ投入とフォルダ�
 指定したときとまったく同じ道で読みます(`converter.intake`)。
 
 **出したCSVをダウンロードさせることはありません。** 受け取る向きだけです。
+
+【置き場所はタブごと】
+変換タブと機側データ集計タブで**別々に覚えます** ── 片方を片づけたときに
+もう片方まで消えると、「入れたはずのものが無い」になります。
 """
 from __future__ import annotations
 
@@ -19,10 +23,35 @@ from . import Blueprint, Request, Response, json_response, refuse
 bp = Blueprint("input")
 
 
+def _intake(request: Request):
+    """どちらの受け取り置き場か。**知らない名前なら `None`。**
+
+    変換タブ(`convert`)は .xlsx / .xlsm、機側データ集計タブ(`tally`)は
+    CSVも受けます。名前は本文・クエリ・ヘッダのどれで来ても拾います
+    (中身をそのまま送る `add` は本文を使えないため)。
+    """
+    kind = (str(request.json().get("kind", "")) or request.arg("kind")
+            or request.header("x-intake") or intake.CONVERT)
+    try:
+        return intake.get(kind)
+    except ValueError:
+        return None
+
+
+def _unknown(request: Request) -> Response:
+    return refuse("知らない受け取り先です",
+                  f"使えるのは {intake.CONVERT} と {intake.TALLY} です",
+                  status=400)
+
+
 @bp.get("/api/input")
 def listing(request: Request) -> Response:
-    return json_response({"ok": True, "names": intake.INTAKE.names(),
-                          "count": intake.INTAKE.count(),
+    store = _intake(request)
+    if store is None:
+        return _unknown(request)
+    return json_response({"ok": True, "kind": store.kind,
+                          "names": store.names(), "count": store.count(),
+                          "suffixes": list(store.suffixes),
                           "limit": app_config.max_files()})
 
 
@@ -53,9 +82,13 @@ def scan(request: Request) -> Response:
 @bp.post("/api/input/begin")
 def begin(request: Request) -> Response:
     if jobs.RUNNER.running:
-        return refuse("変換中は受け取れません", "終わるまで待ってください")
-    intake.INTAKE.begin()
-    return json_response({"ok": True, "count": 0, "limit": app_config.max_files()})
+        return refuse("実行中は受け取れません", "終わるまで待ってください")
+    store = _intake(request)
+    if store is None:
+        return _unknown(request)
+    store.begin()
+    return json_response({"ok": True, "kind": store.kind, "count": 0,
+                          "limit": app_config.max_files()})
 
 
 @bp.post("/api/input/add")
@@ -66,21 +99,27 @@ def add(request: Request) -> Response:
     上限・拡張子・大きさは `converter.intake` が断ります。
     """
     if jobs.RUNNER.running:
-        return refuse("変換中は受け取れません", "終わるまで待ってください")
+        return refuse("実行中は受け取れません", "終わるまで待ってください")
+    store = _intake(request)
+    if store is None:
+        return _unknown(request)
     name = urllib.parse.unquote(request.header("x-filename", ""))
     try:
-        saved = intake.INTAKE.add(name, request.body)
+        saved = store.add(name, request.body)
     except ValueError as exc:
         return json_response({"ok": False, "message": str(exc),
-                              "count": intake.INTAKE.count()})
-    return json_response({"ok": True, "name": saved,
-                          "count": intake.INTAKE.count(),
+                              "kind": store.kind, "count": store.count()})
+    return json_response({"ok": True, "name": saved, "kind": store.kind,
+                          "count": store.count(),
                           "limit": app_config.max_files()})
 
 
 @bp.post("/api/input/clear")
 def clear(request: Request) -> Response:
     if jobs.RUNNER.running:
-        return refuse("変換中は片づけられません", "終わるまで待ってください")
-    intake.INTAKE.clear()
-    return json_response({"ok": True, "count": 0})
+        return refuse("実行中は片づけられません", "終わるまで待ってください")
+    store = _intake(request)
+    if store is None:
+        return _unknown(request)
+    store.clear()
+    return json_response({"ok": True, "kind": store.kind, "count": 0})

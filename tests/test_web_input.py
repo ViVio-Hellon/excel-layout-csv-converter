@@ -86,6 +86,51 @@ class InputRouteTests(WebCase):
         self.assertTrue(data["over"])
         self.assertIn("1 本までです", data["message"])
 
+    def test_集計タブはCSVも受ける(self) -> None:
+        screen_id = self.claim()
+        self.request("POST", "/api/input/begin", {"kind": "tally"},
+                     screen_id=screen_id)
+        status, data = self.request(
+            "POST", "/api/input/add", None, screen_id=screen_id,
+            body="日付,ロット№\n".encode("utf-8"),
+            headers={"X-Filename": "集計.csv", "X-Intake": "tally"})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(data["kind"], "tally")
+
+    def test_変換タブはCSVを受けない(self) -> None:
+        screen_id = self.claim()
+        self.request("POST", "/api/input/begin", {}, screen_id=screen_id)
+        _status, data = self._add(screen_id, "集計.csv", b"a,b\n")
+        self.assertFalse(data["ok"])
+        self.assertIn(".csv", data["message"])
+
+    def test_置き場所はタブごとに分かれる(self) -> None:
+        """**片方を片づけても、もう片方は残ります。**"""
+        screen_id = self.claim()
+        book = self._book()
+        self.request("POST", "/api/input/begin", {}, screen_id=screen_id)
+        self._add(screen_id, "a.xlsx", book)
+        self.request("POST", "/api/input/begin", {"kind": "tally"},
+                     screen_id=screen_id)
+        self.request("POST", "/api/input/add", None, screen_id=screen_id,
+                     body=book, headers={"X-Filename": "b.xlsx",
+                                         "X-Intake": "tally"})
+        self.assertEqual(intake.INTAKE.count(), 1)
+        self.assertEqual(intake.TALLY_INTAKE.count(), 1)
+
+        self.request("POST", "/api/input/clear", {"kind": "tally"},
+                     screen_id=screen_id)
+        self.assertEqual(intake.INTAKE.count(), 1)      # 変換ぶんは残る
+        self.assertEqual(intake.TALLY_INTAKE.count(), 0)
+
+    def test_知らない置き場所は断る(self) -> None:
+        screen_id = self.claim()
+        status, data = self.request("GET", "/api/input?kind=よそ",
+                                    screen_id=screen_id)
+        self.assertEqual(status, 400)
+        self.assertIn("知らない受け取り先", data["reason"])
+
     def test_片づけられる(self) -> None:
         screen_id = self.claim()
         self.request("POST", "/api/input/begin", {}, screen_id=screen_id)
