@@ -179,6 +179,9 @@ def start(*, open_browser_flag: bool = True) -> int:
 
     # -- 待ち受け(まず待機画面)--------------------------------------
     token = secrets.token_urlsafe(32)
+    # 停止のための合図。**画面には渡しません** ── 起動トークンは画面の
+    # HTMLに入るので、断られた2枚目のタブでも持ててしまいます
+    stop_key = secrets.token_urlsafe(16)
     boot = boot_server.BootApp(app_config.port())
     handover = boot_server.Handover(boot)
     srv = server.AppServer(handover)
@@ -191,7 +194,8 @@ def start(*, open_browser_flag: bool = True) -> int:
         tell(server.describe_bind_error(exc), title="起動できません")
         return EXIT_PORT
 
-    launch_guard.write_lock(launch_guard.new_lock(port=srv.port, token=token))
+    launch_guard.write_lock(launch_guard.new_lock(port=srv.port, token=token,
+                                                 stop_key=stop_key))
     srv.start_serving()
     if open_browser_flag:
         open_browser(app_config.base_url(), log)
@@ -205,7 +209,8 @@ def start(*, open_browser_flag: bool = True) -> int:
         user_settings.apply_to_vendor(user_settings.load())
         intake.clear_all()                        # 前回の受け取りは持ち越さない
 
-        application = app_package.create_app(token=token, port=srv.port)
+        application = app_package.create_app(token=token, port=srv.port,
+                                             stop_key=stop_key)
         application.shutdown_hook = srv.request_stop
         application.idle = idle_exit.IdleExit(busy=lambda: jobs.RUNNER.running,
                                               stop=srv.request_stop)

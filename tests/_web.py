@@ -29,6 +29,9 @@ ensure_isolated()
 #: 試験用の合言葉。**本物と同じ経路を通す**ために必ず付けます
 TOKEN = "test-token-abc123"
 
+#: 試験用の停止の合図。**画面には渡らないもの**(stop.bat が持つ側)
+STOP_KEY = "test-stop-key-xyz"
+
 
 class WebCase(unittest.TestCase):
     """1件ごとに、ローカル領域も画面の占有も**まっさらから**。"""
@@ -52,7 +55,7 @@ class WebCase(unittest.TestCase):
         self.addCleanup(intake.clear_all)
 
         import app as app_package
-        self.app = app_package.create_app(token=TOKEN)
+        self.app = app_package.create_app(token=TOKEN, stop_key=STOP_KEY)
 
     def _restore_env(self) -> None:
         if self._before is None:

@@ -49,8 +49,14 @@ TOKEN_EXEMPT_PATHS = frozenset({"/api/health", "/api/alive"})
 
 #: 「いま使っている画面か」を確かめない経路。
 #: `/api/screen/claim` は**これから受け取る**ための口なので当然、
-#: `/api/shutdown` は画面が無くても止められる必要があるため
-#: (`stop.bat` は起動トークンだけを持ってきます)
+#: `/api/shutdown` は画面が無くても止められる必要があるためです
+#: (`stop.bat` は画面を持ちません)。
+#:
+#: **ただし停止は素通しではありません。** 起動トークンは画面のHTMLに
+#: 入っているので、断られた2枚目のタブも持っています。それだけで止められる
+#: と、居ないはずの画面が動いているアプリを落とせてしまいます ── 止めて
+#: よいのは「いま使っている画面」か、ローカル領域の合図(`STOP_KEY`)を
+#: 読める相手(= 同じ端末の `stop.bat`)だけです(`routes/health.py`)
 SCREEN_EXEMPT_PATHS = frozenset({"/api/health", "/api/alive",
                                  "/api/screen/claim", "/api/shutdown"})
 
@@ -149,18 +155,25 @@ class App:
 
 
 def create_app(*, token: Optional[str] = None,
-               port: Optional[int] = None) -> App:
+               port: Optional[int] = None,
+               stop_key: Optional[str] = None) -> App:
     """アプリを1つ組み立てる。
 
     `token` を省くと起動ごとに新しく作ります。試験からは固定値を渡せます。
+
+    `stop_key` は**画面には渡さない合図**です(`runtime/instance.json` に
+    だけ置きます)。停止をブラウザ経由で当てられないようにするためで、
+    起動側が入れます。
     """
     app = App({
         "APP_ID": app_config.app_id(),
         "DISPLAY_NAME": app_config.display_name(),
         "VERSION": app_config.version(),
         "PORT": port or app_config.port(),
-        # 起動ごとの合言葉(守りの3)
+        # 起動ごとの合言葉(守りの3)。**画面のHTMLに入ります**
         "TOKEN": token or secrets.token_urlsafe(32),
+        # 停止のための合図。**画面には入りません**(ローカル領域だけ)
+        "STOP_KEY": stop_key or secrets.token_urlsafe(16),
         "STARTED_AT": time.time(),
         # 起動直後は準備中。重い読み込みが終わってから True にします。
         # 待機画面はこれを見て切り替わります

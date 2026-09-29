@@ -50,13 +50,16 @@ class LockInfo:
 
     **判定の主役ではありません。** 生きているかは応答で確かめます。
     ここに残すのは、止めるときに要るもの ── PID と、正常終了を頼むための
-    起動トークンです。トークンはローカル領域の中にしかないので、
-    ブラウザで開いた別のサイトからは読めません。
+    **停止の合図**(`stop_key`)です。起動トークンのほうは画面のHTMLにも
+    入るので、停止の判断には使いません(断られた2枚目のタブも持っている
+    ため)。この目印はローカル領域の中にしかなく、ブラウザからは読めません。
     """
 
     pid: int = 0
     port: int = 0
     token: str = ""
+    #: 停止のための合図。**画面には渡りません**(こことアプリの中だけ)
+    stop_key: str = ""
     url: str = ""
     app_id: str = ""
     version: str = ""
@@ -120,10 +123,11 @@ def remove_lock() -> None:
         pass
 
 
-def new_lock(*, port: int, token: str) -> LockInfo:
+def new_lock(*, port: int, token: str, stop_key: str = "") -> LockInfo:
     """いまのプロセスぶんの目印を組み立てる。"""
     import sys
     return LockInfo(pid=os.getpid(), port=port, token=token,
+                    stop_key=stop_key,
                     url=app_config.base_url(), app_id=app_config.app_id(),
                     version=app_config.version(), python=sys.executable,
                     app_root=str(app_config.APP_ROOT))
@@ -205,13 +209,20 @@ def refusal_text(result: GuardResult) -> str:
 # ------------------------------------------------------------------
 # 止める側から使うもの
 # ------------------------------------------------------------------
-def request_shutdown(port: int, token: str, *, force: bool = False,
+def request_shutdown(port: int, token: str, *, stop_key: str = "",
+                     force: bool = False,
                      timeout: float = 5.0) -> tuple[int, dict]:
-    """正常終了を頼む。**返事をそのまま返します**(実行中なら 409)。"""
+    """正常終了を頼む。**返事をそのまま返します**(実行中なら 409)。
+
+    `token` は経路を通るため、`stop_key` は**止めてよい相手かを示すため**に
+    要ります(画面を持たない `stop.bat` のための合図)。
+    """
     url = f"http://{app_config.host()}:{port}/api/shutdown"
     request = urllib.request.Request(
-        url, data=json.dumps({"force": force}).encode("utf-8"),
-        headers={"Content-Type": "application/json", "X-Tool-Token": token},
+        url, data=json.dumps({"force": force,
+                              "stop_key": stop_key}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-Tool-Token": token,
+                 "X-Stop-Key": stop_key},
         method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310

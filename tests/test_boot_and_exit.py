@@ -21,7 +21,7 @@ ensure_isolated()
 import boot_server                                 # noqa: E402
 from converter import app_config, boot_screen, idle_exit   # noqa: E402
 from server import Request                         # noqa: E402
-from tests._web import WebCase                     # noqa: E402
+from tests._web import STOP_KEY, WebCase           # noqa: E402
 
 
 class BootScreenTests(unittest.TestCase):
@@ -81,28 +81,55 @@ class BootServerTests(unittest.TestCase):
 
 
 class ShutdownTests(WebCase):
-    def test_合言葉が無ければ止められない(self) -> None:
+    """止めてよいのは**いま使っている画面**と **stop.bat** だけ。"""
+
+    def test_合言葉が無ければ通らない(self) -> None:
         stopped = []
         self.app.shutdown_hook = stopped.append
         status, _data = self.request("POST", "/api/shutdown", {}, token="にせもの")
         self.assertEqual(status, 401)
         self.assertFalse(stopped)
 
-    def test_合言葉があれば止まる(self) -> None:
+    def test_起動トークンだけでは止められない(self) -> None:
+        """**断られた2枚目のタブも起動トークンは持っています**(画面のHTML)。
+
+        それで止められると、ちゃんと開いている画面の作業を、居ないはずの
+        タブが落とせてしまいます。
+        """
         stopped = []
         self.app.shutdown_hook = stopped.append
-        status, _data = self.request("POST", "/api/shutdown", {})
+        self.claim("tab-A")                        # 画面は1枚目が持っている
+        status, data = self.request("POST", "/api/shutdown", {})
+        self.assertEqual(status, 403)
+        self.assertIn("出どころ", data["detail"])
+        self.assertFalse(stopped)
+
+    def test_いま使っている画面なら止まる(self) -> None:
+        stopped = []
+        self.app.shutdown_hook = stopped.append
+        screen_id = self.claim("tab-A")
+        status, _data = self.request("POST", "/api/shutdown", {},
+                                     screen_id=screen_id)
         self.assertEqual(status, 200)
         self.assertTrue(stopped)
 
-    def test_画面が無くても止められる(self) -> None:
-        """`stop.bat` は画面番号を持ちません(合言葉だけ)。"""
+    def test_停止の合図があれば画面が無くても止まる(self) -> None:
+        """`stop.bat` は画面を持たず、ローカル領域の合図を持ってきます。"""
         stopped = []
         self.app.shutdown_hook = stopped.append
-        self.claim("tab-A")                        # 画面は別の誰かが持っている
-        status, _data = self.request("POST", "/api/shutdown", {})
+        self.claim("tab-A")
+        status, _data = self.request("POST", "/api/shutdown",
+                                     {"stop_key": STOP_KEY})
         self.assertEqual(status, 200)
         self.assertTrue(stopped)
+
+    def test_にせの合図では止まらない(self) -> None:
+        stopped = []
+        self.app.shutdown_hook = stopped.append
+        status, _data = self.request("POST", "/api/shutdown",
+                                     {"stop_key": "にせの合図"})
+        self.assertEqual(status, 403)
+        self.assertFalse(stopped)
 
     def test_変換中は確かめてから(self) -> None:
         from converter import jobs
@@ -114,7 +141,8 @@ class ShutdownTests(WebCase):
                      screen_id=screen_id)
         stopped = []
         self.app.shutdown_hook = stopped.append
-        status, data = self.request("POST", "/api/shutdown", {})
+        status, data = self.request("POST", "/api/shutdown", {},
+                                    screen_id=screen_id)
         self.wait_for_job()
         if status == 409:                          # まだ走っていれば断られる
             self.assertTrue(data["running"])

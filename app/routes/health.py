@@ -115,9 +115,28 @@ def alive(request: Request) -> Response:
 
 @bp.post("/api/shutdown")
 def shutdown(request: Request) -> Response:
-    """バックエンドを終わらせる。**実行中は確かめてから。**"""
+    """バックエンドを終わらせる。**出どころと、実行中かを確かめてから。**
+
+    止めてよいのは2つだけです。
+
+        いま使っている画面   `X-Screen-Id` が持ち主のもの
+        同じ端末の stop.bat  `runtime/instance.json` の合図を持ってくる
+
+    起動トークンだけでは通しません ── あれは画面のHTMLに入っているので、
+    **断られた2枚目のタブも持っています。** それで止められると、
+    ちゃんと開いている画面の作業を、居ないはずのタブが落とせてしまいます。
+    """
     app = request.app
     payload = request.json()
+    by_screen = screen_lock.LOCK.holds(request.header(screen_lock.HEADER))
+    key = str(payload.get("stop_key", "")) or request.header("x-stop-key")
+    if not by_screen and not (app.config["STOP_KEY"]
+                              and key == app.config["STOP_KEY"]):
+        log.warning("停止を断りました(出どころを確かめられません)")
+        return refuse("停止できません",
+                      "この操作の出どころを確かめられません。"
+                      "いま使っている画面か、stop.bat から止めてください",
+                      status=403)
     if jobs.RUNNER.running and not payload.get("force"):
         job = jobs.RUNNER.job
         return json_response({
@@ -127,8 +146,7 @@ def shutdown(request: Request) -> Response:
         }, status=409)
     if jobs.RUNNER.running:
         jobs.RUNNER.cancel()
-    who = "画面" if screen_lock.LOCK.holds(request.header(screen_lock.HEADER)) \
-        else "stop.bat"
+    who = "画面" if by_screen else "stop.bat"
     log.info("停止を受け付けました(%s)", who)
     if app.shutdown_hook is not None:
         app.shutdown_hook(f"{who}から停止を頼まれました")

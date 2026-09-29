@@ -93,20 +93,23 @@ def stop(*, force: bool = False, timeout: float = WAIT_SEC) -> int:
 
     lock = found.lock or launch_guard.read_lock()
     token = lock.token if lock else ""
+    stop_key = lock.stop_key if lock else ""
     pid = int(found.pid or (lock.pid if lock else 0))
     port = int((found.health.get("port") or app_config.port()))
     print(f"止めます: PID {pid} / {found.url}")
 
     # 1. まず本人へ頼む
-    code, answer = launch_guard.request_shutdown(port, token, force=force)
+    code, answer = launch_guard.request_shutdown(port, token, stop_key=stop_key,
+                                                force=force)
     if code == 409 and answer.get("running"):
         print(f"\n{answer.get('reason')}: {answer.get('detail')}")
         if not force and not _ask("中止して終了しますか?"):
             print("止めませんでした。")
             return 2
-        code, answer = launch_guard.request_shutdown(port, token, force=True)
-    if code == 401:
-        print("停止を断られました(合言葉が合いません)。"
+        code, answer = launch_guard.request_shutdown(port, token,
+                                                    stop_key=stop_key, force=True)
+    if code in (401, 403):
+        print("停止を断られました(出どころを確かめられませんでした)。"
               f"\n  {launch_guard.lock_path()} を読める利用者で実行してください")
 
     # 2. 終わるのを待つ
