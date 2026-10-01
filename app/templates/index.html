@@ -69,9 +69,20 @@
           あればマスタより先に読みます</b>。空なら参照用マスタの置き場所の
           <code>停止内訳.csv</code> を見ます。</span>
       </label>
+      <label class="field">
+        <span class="label">ログの置き場所<em>任意</em></span>
+        <input type="text" id="log_dir" spellcheck="false"
+               placeholder="空ならこの端末の中(ログを開く で見られます)">
+        <span class="hint" id="hint-log_dir"></span>
+        <span class="hint">共有へ集めたいときに指定します。
+          <code>app.log</code>(筋道)/<code>error.log</code>(うまくいかなかった
+          ことだけ)/<code>launcher.log</code>(起動)の3本が出ます。
+          書けない場所ならこの端末の中へ戻し、その理由も残します。</span>
+      </label>
     </div>
 
     <div class="notice" id="stop-reasons"></div>
+    <div class="notice warn" id="log-note" hidden></div>
 
     <div class="row">
       <button class="primary" id="save">設定を保存</button>

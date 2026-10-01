@@ -25,8 +25,11 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import check, totals, workday
+from . import app_config, check, totals, workday
 from .books import first_sheet
+from .logging_utils import get_logger
+
+log = get_logger("run")
 
 #: 読む拡張子。`.xls`(古い形式)は ZIP ではないので読めません
 SUFFIXES = (".xlsx", ".xlsm")
@@ -140,11 +143,15 @@ def _write_material(material: dict, report_date: str, line: str,
 
 
 def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
-            on_file=None) -> RunResult:
+            on_file=None, tag: str = "") -> RunResult:
     """変換する。`line` を渡すと、シートの呼び名より優先します。
 
     `on_file` は1本終わるたびに呼ばれます(進み具合を出すため)。
     `dry_run` なら**CSVを1本も書きません** ── 読めるか・数が合うかだけ見ます。
+
+    `tag` は仕事の番号(画面から来たときの `job.id`)。**ログの各行に付きます**
+    ので、あとから `error.log` で時刻と番号を拾い、その番号で `app.log` を
+    追えば同じ仕事の筋道が頭から並びます。
     """
     from nippou.db import connection
     from nippou.db.repository import NippouRepository
@@ -155,6 +162,13 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
     out_dir = Path(out_dir)
     result = RunResult()
     books = gather(inputs)
+    mark = f"[job={tag}] " if tag else ""
+    log.info("%s変換開始 版=%s 本数=%d ライン=%s 出力先=%s 確かめるだけ=%s",
+             mark, app_config.version(), len(books), line or "(自動)",
+             out_dir, dry_run)
+    log.info("%s読む相手: %s", mark,
+             "／".join(b.name for b in books[:20])
+             + (" ほか" if len(books) > 20 else ""))
     #: (作業日, ライン) → 機側データ集計の材料(シートから直に拾った行)
     material: dict[tuple[str, str], list] = {}
 
@@ -166,7 +180,10 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
 
         for book in books:
             one = FileResult(path=book, name=book.name)
+            step = f"{mark}{len(result.files) + 1}/{len(books)} {book.name}"
             try:
+                log.info("%s 開きます 大きさ=%s バイト", step,
+                         f"{book.stat().st_size:,}")
                 # **1冊につき1回だけ開きます。** 頭・明細・検算で3回開いて
                 # いたのを1回にまとめています(共有フォルダでは往復が効く)。
                 # 読み手は集計側と同じ `converter/cells` ── ふりがなを値に
@@ -182,6 +199,10 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
                 one.report_date = head.report_date
                 one.line_text = head.line_text
                 one.line = line or nippou_sheet.guess_line(head.line_text)
+                log.info("%s シート=%s 作業日=%s ライン=%s→%s%s", step,
+                         sheet_name, one.report_date or "(空)",
+                         one.line_text or "(空)", one.line or "(決まらず)",
+                         f" ※{one.note}" if one.note else "")
                 if not one.line:
                     raise ValueError(
                         f"ラインが決まりません(シートの呼び名: "
@@ -219,6 +240,7 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
                     repo.save(page.header, page.details)
                     days.add((page.header.report_date, page.header.line))
 
+
                 # **機側データ集計の材料も、同じシートから拾っておきます。**
                 # 4本組は日報管理ツールが持っている欄だけなので(停止は
                 # 記号、内訳名はありません)、それだけを材料にすると
@@ -227,8 +249,18 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
                 # 集計しても**ブックから集計したのと同じ**になります
                 one.tally_rows = _tally_material(
                     book_sheet, one.line, one.report_date, material)
+                log.info("%s 読めました ページ=%d 行=%d 集計の材料=%d行 検算=%s",
+                         step, one.pages, one.rows, one.tally_rows,
+                         one.verify.summary())
+                for bad in one.verify.bad:
+                    # **合わなかった項目は1行ずつ。** あとで追うときに
+                    # 「どの直のどの数がいくつ違ったか」まで要ります
+                    log.warning("%s 検算が合いません %s", step, bad.text())
             except Exception as exc:              # noqa: BLE001 - 残りは続ける
                 one.error = str(exc)
+                # **中身(traceback)まで残します。** 「読めませんでした」
+                # だけでは、なぜ読めなかったかに進めません
+                log.exception("%s 読めませんでした: %s", step, exc)
             result.files.append(one)
             if on_file:
                 on_file(one, len(result.files), len(books))
@@ -245,5 +277,15 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
                 made = _write_material(material, report_date, ln, out_dir)
                 if made:
                     result.written.append(made)
+                log.info("%s書きました %s %s → %s", mark, report_date, ln,
+                         "／".join(sorted(
+                             p.name for p, _n in found.files.values()))
+                         + (f"／{made.name}" if made else ""))
         conn.close()
+    log.info("%s変換おわり 読めた=%d/%d 数が合った=%d 書いたCSV=%d", mark,
+             len(result.read_ok), len(result.files), len(result.verified),
+             len(result.written))
+    for one in result.files:
+        if not one.ok:
+            log.warning("%s読めなかった: %s ── %s", mark, one.name, one.error)
     return result

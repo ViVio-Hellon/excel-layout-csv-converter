@@ -39,6 +39,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .books import NotXlsx, read_sheets
+from .logging_utils import get_logger
+
+log = get_logger("tally")
 
 #: 拾い始める行。上は見出し(1〜7行目)
 FIRST_ROW = 8
@@ -1012,7 +1015,8 @@ def master_names() -> dict:
         return {}
 
 
-def build(paths, *, on_file=None, any_sheet: bool = False) -> Tally:
+def build(paths, *, on_file=None, any_sheet: bool = False,
+          tag: str = "") -> Tally:
     """ブックを順に読み、1枚の表にする。
 
     `paths` の順がそのまま**積む順**です(上詰めの補完は並び順で結果が
@@ -1040,7 +1044,12 @@ def build(paths, *, on_file=None, any_sheet: bool = False) -> Tally:
     """
     tally = Tally(any_sheet=any_sheet)
     paths = [Path(p) for p in paths]
+    mark = f"[job={tag}] " if tag else ""
+    log.info("%s機側データ集計 開始 本数=%d 機側以外も読む=%s",
+             mark, len(paths), any_sheet)
     grids, stops = _scan_csv(paths)
+    log.info("%s停止の記号→内訳名: %d 件(停止内訳CSVと設定部のマスタから)",
+             mark, len(stops))
 
     # ①読む。**この時点では積みません**(どれが元に近いかを見てから積む)
     found: list[tuple[Path, SheetResult, list]] = []
@@ -1066,11 +1075,31 @@ def build(paths, *, on_file=None, any_sheet: bool = False) -> Tally:
                 found.append((path, result, rows))
                 made.append(result)
         tally.sheets.extend(made)
+        for one in made:
+            # **1枚につき1行。** 拾った/拾わなかったと、その理由を同じ言葉で
+            if one.taken:
+                log.info("%s%d/%d %s%s 拾いました %d行 日付=%s ライン=%s%s",
+                         mark, index, len(paths), path.name,
+                         f" / {one.sheet}" if one.sheet != path.name else "",
+                         len(rows), one.date or "(不明)", one.line or "(不明)",
+                         f" ※{one.note}" if one.note else "")
+            else:
+                log.info("%s%d/%d %s%s 拾いません: %s", mark, index, len(paths),
+                         path.name,
+                         f" / {one.sheet}" if one.sheet != path.name else "",
+                         one.skipped)
         if on_file:
             on_file(path, index, len(paths), made)
 
     # ②同じ日・同じラインが重なっていたら、元に近いほうだけ残す
     _resolve(found)
+    for _path, one, kept in found:
+        if one.skipped and "二重に数えない" in one.skipped:
+            log.info("%s%s は飛ばしました: %s", mark,
+                     one.sheet or one.file, one.skipped)
+        elif one.note and "重なった日" in one.note:
+            log.info("%s%s は一部だけ拾いました(%d行): %s", mark,
+                     one.sheet or one.file, len(kept), one.note)
 
     # ③渡された順に積む
     for _path, result, rows in found:
@@ -1080,6 +1109,9 @@ def build(paths, *, on_file=None, any_sheet: bool = False) -> Tally:
     # 混ぜたまま埋めると板の行に機側の値が入ります
     for line, rows in tally.groups().items():
         _fill_all(rows, line)
+    log.info("%s機側データ集計 おわり %s", mark, tally.summary())
+    for name, why in tally.errors:
+        log.warning("%s読めませんでした: %s ── %s", mark, name, why)
     return tally
 
 
@@ -1213,10 +1245,12 @@ def write_csvs(tally: Tally, out_dir) -> list[Path]:
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    groups = tally.groups()
-    return [_write_one(rows, out_dir / f"{file_stem(tally, line, rows)}.csv",
+    made = [_write_one(rows, out_dir / f"{file_stem(tally, line, rows)}.csv",
                        headers_for(line))
-            for line, rows in groups.items()]
+            for line, rows in tally.groups().items()]
+    for path in made:
+        log.info("書きました %s", path)
+    return made
 
 
 def _write_one(rows: list, path: Path, headers: tuple) -> Path:

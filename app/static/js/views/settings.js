@@ -7,7 +7,8 @@
 import { api, reason } from "../api.js";
 import * as toast from "../toast.js";
 
-const FIELDS = ["input_dir", "output_dir", "line", "ref_dir", "stop_csv"];
+const FIELDS = ["input_dir", "output_dir", "line", "ref_dir", "stop_csv",
+                "log_dir"];
 const $ = (id) => document.getElementById(id);
 
 function show(data) {
@@ -25,6 +26,13 @@ function show(data) {
     stops.hidden = !text;
     stops.textContent = text;
     stops.className = "notice" + (found && found.ok ? "" : " warn");
+  }
+  // ログが指した場所へ出せなかったときは、**黙らせません**
+  const logNote = $("log-note");
+  if (logNote) {
+    const why = (data.logs && data.logs.note) || "";
+    logNote.hidden = !why;
+    logNote.textContent = why;
   }
   (data.paths || []).forEach((item) => {
     const hint = $("hint-" + item.key);

@@ -244,7 +244,12 @@ class Runner:
             job = self.job
         user_settings.apply_to_vendor(settings)
         job.master_ok, job.master_notice = master_notice()
-        log.info("変換開始 id=%s %d本 line=%r dry_run=%s 機側データ集計=%s → %s",
+        log.info("[job=%s] 設定: 入力=%s 出力先=%s ライン=%s 参照用マスタ=%s "
+                 "停止内訳CSV=%s ログ=%s", self.job.id,
+                 settings.input_dir or "(ドラッグ)", settings.output_dir,
+                 settings.line or "(自動)", settings.ref_dir or "(既定)",
+                 settings.stop_csv or "(既定)", settings.log_dir or "(既定)")
+        log.info("[job=%s] 変換開始(画面から) %d本 line=%r dry_run=%s 機側データ集計=%s → %s",
                  job.id, job.total, settings.line, dry_run, tally,
                  out_dir or "(書きません)")
         self._thread = threading.Thread(
@@ -286,7 +291,8 @@ class Runner:
                            dry_run=dry_run, any_sheet=any_sheet,
                            started_at=time.time())
             job = self.job
-        log.info("機側データ集計 開始 id=%s %d本 → %s", job.id, job.total, out_dir)
+        log.info("[job=%s] 機側データ集計 開始(画面から) %d本 → %s",
+                 job.id, job.total, out_dir)
         self._thread = threading.Thread(
             target=self._run_tally, args=(sources, job),
             name="tally", daemon=True)
@@ -300,7 +306,7 @@ class Runner:
         self._cancel.set()
         with self._lock:
             self.job.message = "中止しています(いま読んでいる1本の区切りまで)"
-        log.info("中止を受け付けました id=%s", self.job.id)
+        log.info("[job=%s] 中止を受け付けました", self.job.id)
         return True
 
     # -- 中身 --------------------------------------------------------
@@ -332,7 +338,7 @@ class Runner:
 
         try:
             found = run.convert([str(b) for b in books], job.out_dir or ".",
-                                line=settings.line, dry_run=dry_run,
+                                line=settings.line, dry_run=dry_run, tag=job.id,
                                 on_file=on_file)
             if job.tally:
                 self._tally(books, job, dry_run)
@@ -347,19 +353,19 @@ class Runner:
                 job.phase = PHASE_END
                 job.message = (f"中止しました({job.done}/{job.total} 本まで"
                                "読みました。CSVは書いていません)")
-            log.info("中止しました id=%s %d/%d", job.id, job.done, job.total)
+            log.info("[job=%s] 中止しました %d/%d", job.id, job.done, job.total)
         except Exception as exc:                  # noqa: BLE001 - 画面へ出す
             with self._lock:
                 job.state = FAILED
                 job.phase = PHASE_END
                 job.error = str(exc)
                 job.message = "変換を続けられませんでした"
-            log.exception("変換が失敗しました id=%s", job.id)
+            log.exception("[job=%s] 変換が失敗しました", job.id)
         finally:
             with self._lock:
                 job.finished_at = time.time()
                 job.current = ""
-            log.info("変換おわり id=%s 状態=%s 読めた=%d/%d 数が合った=%d "
+            log.info("[job=%s] 変換おわり(画面) 状態=%s 読めた=%d/%d 数が合った=%d "
                      "書いたCSV=%d %.1f秒", job.id, job.state,
                      len(job.read_ok), len(job.files), len(job.verified),
                      job.written, job.elapsed())
@@ -406,7 +412,7 @@ class Runner:
 
         try:
             found = tally_mod.build(sources, on_file=on_file,
-                                    any_sheet=job.any_sheet)
+                                    any_sheet=job.any_sheet, tag=job.id)
             retell(found)
             made = (tally_mod.write_csvs(found, job.out_dir)
                     if found.rows and not job.dry_run else [])
@@ -426,7 +432,7 @@ class Runner:
             for name, why in found.errors:
                 with self._lock:
                     job.files.append(FileRow(name=name, ok=False, error=why))
-            log.info("機側データ集計 おわり id=%s %s → %s",
+            log.info("[job=%s] 機側データ集計 おわり %s → %s",
                      job.id, found.summary(), job.tally_path or "(書かず)")
         except Cancelled:
             with self._lock:
@@ -434,14 +440,14 @@ class Runner:
                 job.phase = PHASE_END
                 job.message = (f"中止しました({job.done}/{job.total} 本まで"
                                "読みました。CSVは書いていません)")
-            log.info("機側データ集計 中止 id=%s", job.id)
+            log.info("[job=%s] 機側データ集計 中止", job.id)
         except Exception as exc:                  # noqa: BLE001 - 画面へ出す
             with self._lock:
                 job.state = FAILED
                 job.phase = PHASE_END
                 job.error = str(exc)
                 job.message = "機側データ集計を作れませんでした"
-            log.exception("機側データ集計で失敗しました id=%s", job.id)
+            log.exception("[job=%s] 機側データ集計で失敗しました", job.id)
         finally:
             with self._lock:
                 job.finished_at = time.time()
@@ -471,13 +477,13 @@ class Runner:
                     job.tally_paths = [str(one) for one in made]
             skipped = [s for s in found.sheets if not s.taken]
             if skipped:
-                log.info("機側データ集計: 拾わなかったシート %d 枚(%s)",
-                         len(skipped), skipped[0].skipped)
-            log.info("機側データ集計: %s", found.summary())
+                log.info("[job=%s] 機側データ集計: 拾わなかったシート %d 枚(%s)",
+                         job.id, len(skipped), skipped[0].skipped)
+            log.info("[job=%s] 機側データ集計: %s", job.id, found.summary())
         except Exception as exc:                  # noqa: BLE001 - 変換は済んでいる
             with self._lock:
                 job.tally_message = f"機側データ集計を作れませんでした: {exc}"
-            log.exception("機側データ集計で失敗しました id=%s", job.id)
+            log.exception("[job=%s] 機側データ集計で失敗しました", job.id)
 
     @staticmethod
     def _summary_text(job: Job) -> str:

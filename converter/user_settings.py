@@ -25,7 +25,8 @@ from pathlib import Path
 from . import app_config
 
 #: 画面から変えられる項目。**表示名の出どころもここ1つ**
-FIELDS = ("input_dir", "output_dir", "line", "ref_dir", "stop_csv")
+FIELDS = ("input_dir", "output_dir", "line", "ref_dir", "stop_csv",
+          "log_dir")
 
 LABELS = {
     "input_dir": "入力フォルダ",
@@ -33,6 +34,7 @@ LABELS = {
     "line": "ライン",
     "ref_dir": "参照用マスタの置き場所",
     "stop_csv": "停止内訳CSVの置き場所",
+    "log_dir": "ログの置き場所",
 }
 
 #: 停止内訳CSVの名前。**フォルダを指されたときに探す相手**
@@ -55,6 +57,8 @@ class Settings:
     #: 停止内訳CSV。**フォルダでも、ファイルそのものでも受けます**
     #: (空なら参照用マスタの置き場所の `停止内訳.csv`)
     stop_csv: str = ""
+    #: ログの置き場所(空ならローカル領域の `logs`)。**書けなければ戻します**
+    log_dir: str = ""
 
     def as_dict(self) -> dict[str, str]:
         return {k: str(v or "") for k, v in asdict(self).items()}
@@ -137,7 +141,7 @@ def stop_csv_path(settings: Settings) -> Path | None:
 def describe_paths(settings: Settings) -> list[dict]:
     """1項目ずつ、**どこを指していて、そこはあるのか**を返す。"""
     found: list[dict] = []
-    for key in ("input_dir", "output_dir", "ref_dir"):
+    for key in ("input_dir", "output_dir", "ref_dir", "log_dir"):
         text = getattr(settings, key)
         item = {"key": key, "label": LABELS[key], "text": text,
                 "resolved": "", "exists": False, "note": ""}
@@ -148,7 +152,8 @@ def describe_paths(settings: Settings) -> list[dict]:
                 item["exists"] = path.is_dir()
                 if not item["exists"]:
                     item["note"] = ("まだありません"
-                                    if key == "output_dir" else "見つかりません")
+                                    if key in ("output_dir", "log_dir")
+                                    else "見つかりません")
             except ValueError as exc:
                 item["note"] = str(exc)
         found.append(item)
@@ -213,6 +218,10 @@ def apply_to_vendor(settings: Settings) -> None:
     ので、この向き先が業務データに触ることはありません)。
     """
     app_config.ensure_local_dirs()
+    # **ログの置き場所を先に決めます。** あとの行で何かあったとき、
+    # その知らせが指された場所へ出るように
+    from . import logging_utils
+    logging_utils.use_folder(settings.log_dir)
     os.environ["NIPPOU_APP_DIR"] = str(app_config.local_dir("work") / "nippou")
     Path(os.environ["NIPPOU_APP_DIR"]).mkdir(parents=True, exist_ok=True)
     if settings.ref_dir:

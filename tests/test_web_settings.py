@@ -161,3 +161,36 @@ class StopReasonsTests(WebCase):
         # 空にしたら**消えます**(前の場所を読み続けない)
         self.settings(screen_id, stop_csv="")
         self.assertFalse(theirs.get("stop_reason_file"))
+
+
+class LogSettingTests(WebCase):
+    """ログの置き場所 ── **設定から変えられること。**"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from converter import logging_utils
+        self.addCleanup(logging_utils.use_folder, "")
+
+    def test_保存するとそこへ出る(self) -> None:
+        from converter import logging_utils
+
+        screen_id = self.claim()
+        where = self.tmp / "共有ログ"
+        data = self.settings(screen_id, log_dir=str(where))
+        self.assertEqual(data["logs"]["folder"], str(where))
+        self.assertEqual(logging_utils.folder(), where)
+        self.assertTrue((where / "app.log").is_file())
+
+    def test_どこを指しているか返す(self) -> None:
+        screen_id = self.claim()
+        data = self.settings(screen_id, log_dir=str(self.tmp / "ログ"))
+        found = {p["key"]: p for p in data["paths"]}
+        self.assertEqual(found["log_dir"]["resolved"], str(self.tmp / "ログ"))
+
+    def test_書けない場所なら断りを返す(self) -> None:
+        """**黙って消しません。** 画面にも理由を出します。"""
+        screen_id = self.claim()
+        blocker = self.tmp / "ファイルです"
+        blocker.write_text("", encoding="utf-8")
+        data = self.settings(screen_id, log_dir=str(blocker / "下"))
+        self.assertIn("ローカル領域", data["logs"]["note"])

@@ -76,7 +76,8 @@ def open_folder(request: Request) -> Response:
         elif what == "input":
             target = user_settings.resolve(settings.input_dir)
         elif what == "logs":
-            target = app_config.local_dir("logs")
+            from converter import logging_utils
+            target = logging_utils.folder()       # 設定で変えた先を開きます
         else:
             return refuse("開けない場所です", what, status=400)
     except ValueError as exc:

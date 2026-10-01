@@ -157,9 +157,18 @@ def start(*, open_browser_flag: bool = True) -> int:
     import server
     from converter import (app_config, idle_exit, intake, jobs,
                            user_settings)
+    from converter import logging_utils
     from converter.logging_utils import get_logger
 
+    # **ログの置き場所を最初に決めます。** 設定で指されていれば、起動の
+    # 筋道からそちらへ出します(書けなければローカルのまま。理由も残ります)
+    refused = logging_utils.use_folder(user_settings.load().log_dir)
+
     log = get_logger("launcher")
+    log.info("起動します 版=%s pid=%s ログ=%s", app_config.version(),
+             os.getpid(), logging_utils.folder())
+    if refused:
+        log.warning(refused)
 
     # -- 多重起動の判定(基盤仕様書 2.4)------------------------------
     existing = launch_guard.check_existing()

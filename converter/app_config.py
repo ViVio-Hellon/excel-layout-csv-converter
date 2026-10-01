@@ -54,7 +54,7 @@ _FALLBACK: dict[str, Any] = {
         "idle_exit_minutes": 30,
     },
     "defaults": {"input_dir": "", "output_dir": "", "line": "", "ref_dir": "",
-                 "stop_csv": ""},
+                 "stop_csv": "", "log_dir": ""},
     "lines": {"coil": ["LS"]},
 }
 
