@@ -46,6 +46,8 @@ class FileResult:
     error: str = ""
     #: 読むときに手を入れたこと(作業日の書き方を直した、など)。**黙って直さない**
     note: str = ""
+    #: 機側データ集計の材料として拾えた行数(5本目のCSVに出ます)
+    tally_rows: int = 0
     verify: check.Report = field(default_factory=check.Report)
 
     @property
@@ -103,6 +105,39 @@ def _totals_of(pages) -> tuple[dict, float]:
     return by_shift, stops
 
 
+def _tally_material(sheet, line: str, report_date: str, material: dict) -> int:
+    """そのシートから、機側データ集計の材料を拾って覚える。拾った行数を返す。
+
+    **拾えなくても変換は止めません**(停止2枠のシートなど)。集計の材料が
+    無いだけで、4本組のCSVはこれまでどおり出ます。
+    """
+    from . import tally
+
+    try:
+        rows, found = tally.take_sheet(sheet, file_name=sheet.name,
+                                       any_sheet=True, line=line)
+    except Exception:                             # noqa: BLE001 - 変換は続ける
+        return 0
+    if found.skipped or not rows:
+        return 0
+    material.setdefault((report_date, line), []).extend(rows)
+    return len(rows)
+
+
+def _write_material(material: dict, report_date: str, line: str,
+                    out_dir: Path):
+    """その日の材料を、4本組と同じ日付フォルダへ**5本目**として書く。"""
+    from nippou.reporting import csv_export
+
+    from . import tally
+
+    rows = material.get((report_date, line))
+    if not rows:
+        return None
+    folder = csv_export.dated_dir(Path(out_dir), report_date, line)
+    return tally.write_rows(rows, line, folder)
+
+
 def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
             on_file=None) -> RunResult:
     """変換する。`line` を渡すと、シートの呼び名より優先します。
@@ -119,6 +154,8 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
     out_dir = Path(out_dir)
     result = RunResult()
     books = gather(inputs)
+    #: (作業日, ライン) → 機側データ集計の材料(シートから直に拾った行)
+    material: dict[tuple[str, str], list] = {}
 
     with tempfile.TemporaryDirectory(prefix="convert-") as work:
         # **使い捨て。** 表はここで作られ、抜けるときに消えます
@@ -133,9 +170,9 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
                 # いたのを1回にまとめています(共有フォルダでは往復が効く)。
                 # 読み手は集計側と同じ `converter/cells` ── ふりがなを値に
                 # 混ぜない一点だけ、移行元から直してあります
-                page = first_sheet(book)
-                sheet_name = page.name
-                rows = xlsx_sheet.rows_of(page.cells)
+                book_sheet = first_sheet(book)
+                sheet_name = book_sheet.name
+                rows = xlsx_sheet.rows_of(book_sheet.cells)
                 # 作業日が `2025/7/15` のような書き方のブックがあります。
                 # **同じ日付**なので、読める形に直してから渡します
                 rows, one.note = workday.fix_rows(rows, sheet_name)
@@ -177,6 +214,15 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
                 for page in parsed.pages:
                     repo.save(page.header, page.details)
                     days.add((page.header.report_date, page.header.line))
+
+                # **機側データ集計の材料も、同じシートから拾っておきます。**
+                # 4本組は日報管理ツールが持っている欄だけなので(停止は
+                # 記号、内訳名はありません)、それだけを材料にすると
+                # 「同じシートなのに集計の答えが変わる」が起きます。
+                # シートから直に拾ったものを一緒に残せば、あとでCSVから
+                # 集計しても**ブックから集計したのと同じ**になります
+                one.tally_rows = _tally_material(
+                    book_sheet, one.line, one.report_date, material)
             except Exception as exc:              # noqa: BLE001 - 残りは続ける
                 one.error = str(exc)
             result.files.append(one)
@@ -192,5 +238,8 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
                         pass
                 found = csv_export.write_daily_set(repo, report_date, ln, out_dir)
                 result.written.extend(path for path, _n in found.files.values())
+                made = _write_material(material, report_date, ln, out_dir)
+                if made:
+                    result.written.append(made)
         conn.close()
     return result

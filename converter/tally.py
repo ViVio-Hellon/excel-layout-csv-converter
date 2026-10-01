@@ -166,6 +166,8 @@ class SheetResult:
     skipped: str = ""          # 拾わなかった理由(空なら拾った)
     #: 拾ったけれど言っておくこと(内訳名が引けなかった記号など)
     note: str = ""
+    #: 材料としての強さ(`PRIORITY_*`)。同じ日が重なったとき、強いほうを使う
+    priority: int = 0
     kind: str = "シート"        # シート / CSV(シート) / CSV(集計) / CSV(集計明細)
 
     @property
@@ -441,12 +443,16 @@ def check_book(path, *, any_sheet: bool = False) -> list[dict]:
             for sheet in sheets]
 
 
-def take_sheet(sheet, *, file_name: str = "",
-               any_sheet: bool = False) -> tuple[list[list[str]], SheetResult]:
-    """シート1枚から行を拾う。**VBAの転記そのまま。**"""
+def take_sheet(sheet, *, file_name: str = "", any_sheet: bool = False,
+               line: str = "") -> tuple[list[list[str]], SheetResult]:
+    """シート1枚から行を拾う。**VBAの転記そのまま。**
+
+    `line` を渡すと、シート名から当てたラインより優先します(変換が
+    `--line` で入れ先を決めているときに、そちらへ合わせるため)。
+    """
     result = SheetResult(file=file_name, sheet=sheet.name,
                          date=sheet_date(sheet.name),
-                         line=line_name(sheet_line(sheet.name)))
+                         line=line or line_name(sheet_line(sheet.name)))
     why = why_skipped(sheet, any_sheet=any_sheet)
     if why:
         result.skipped = why
@@ -939,6 +945,27 @@ def _fill_all(rows: list[list[str]], line: str = "") -> None:
 # ------------------------------------------------------------------
 # まとめる
 # ------------------------------------------------------------------
+#: 材料としての強さ。**同じ日・同じラインが2つあったら、強いほうだけ使います**
+PRIORITY_BOOK = 1        # ブック(シートそのもの。VBAと同じ材料)
+PRIORITY_TALLIED = 2     # 変換が残した材料／前に出した集計(シートから拾ったもの)
+PRIORITY_DETAIL = 3      # 集計明細CSV(日報が持っている欄だけ)
+PRIORITY_OTHER = 4       # 停止内訳など(行は出ません)
+
+
+def _priority(path: Path, grid) -> int:
+    """その相手が、集計の材料としてどれだけ元に近いか。"""
+    if path.suffix.lower() != ".csv":
+        return PRIORITY_BOOK
+    if not grid:
+        return PRIORITY_OTHER
+    head = list(grid[0])
+    if head[:len(HEADERS)] == list(HEADERS) or head[:len(SHEET_HEADERS)] == list(SHEET_HEADERS):
+        return PRIORITY_TALLIED
+    if (grid[0][0] if grid[0] else "") == MARK_VALUE:
+        return PRIORITY_TALLIED          # シートをCSVで保存したもの
+    return PRIORITY_DETAIL if csv_kind(head) == DETAIL_CSV else PRIORITY_OTHER
+
+
 def _scan_csv(paths: list[Path]) -> tuple[dict, StopNames]:
     """CSVを先に1度読み、表と**停止の内訳名**を集める。
 
@@ -991,6 +1018,15 @@ def build(paths, *, on_file=None, any_sheet: bool = False) -> Tally:
     集計明細CSVを読むときに使うためです。入れた順(ドラッグの順)に左右
     されないように、先に全部集めます。
 
+    **同じ日・同じラインを2回積みません。** 日付フォルダには、変換が残した
+    材料(`機側データ集計_…`)と集計明細の両方が入っています。両方を積むと
+    その日が二重に数えられるので、**元に近いほう**だけ使います:
+
+        ブック > 変換が残した材料・前に出した集計 > 集計明細
+
+    飛ばしたほうは理由を言います(黙って捨てません)。**積む順は渡された順**
+    のままです ── 前に出した集計に追記する使い方(VBAと同じ)を変えないため。
+
     `any_sheet` を立てると、**シート名の `_機側` を問いません**(A1が「集計」で
     停止3枠なら読みます)。VBAは機側のシートだけを見るので、**立てた時点で
     VBAと同じ結果ではなくなります** ── 使ったことは結果に書きます。
@@ -998,35 +1034,88 @@ def build(paths, *, on_file=None, any_sheet: bool = False) -> Tally:
     tally = Tally(any_sheet=any_sheet)
     paths = [Path(p) for p in paths]
     grids, stops = _scan_csv(paths)
+
+    # ①読む。**この時点では積みません**(どれが元に近いかを見てから積む)
+    found: list[tuple[Path, SheetResult, list]] = []
     for index, path in enumerate(paths, start=1):
+        made: list[SheetResult] = []
         if path.suffix.lower() == ".csv":
             rows, result = take_csv(path, grid=grids.get(path), stops=stops)
-            tally.add(rows, result.line)
-            tally.sheets.append(result)
-            if on_file:
-                on_file(path, index, len(paths), [result])
-            continue
-        try:
-            sheets = read_sheets(path)
-        except (NotXlsx, OSError) as exc:
-            tally.errors.append((path.name, str(exc)))
-            if on_file:
-                on_file(path, index, len(paths), [])
-            continue
-        made: list[SheetResult] = []
-        for sheet in sheets:
-            rows, result = take_sheet(sheet, file_name=path.name,
-                                      any_sheet=any_sheet)
-            tally.add(rows, result.line)
-            tally.sheets.append(result)
+            result.priority = _priority(path, grids.get(path))
+            found.append((path, result, rows))
             made.append(result)
+        else:
+            try:
+                sheets = read_sheets(path)
+            except (NotXlsx, OSError) as exc:
+                tally.errors.append((path.name, str(exc)))
+                if on_file:
+                    on_file(path, index, len(paths), [])
+                continue
+            for sheet in sheets:
+                rows, result = take_sheet(sheet, file_name=path.name,
+                                          any_sheet=any_sheet)
+                result.priority = PRIORITY_BOOK
+                found.append((path, result, rows))
+                made.append(result)
+        tally.sheets.extend(made)
         if on_file:
             on_file(path, index, len(paths), made)
+
+    # ②同じ日・同じラインが重なっていたら、元に近いほうだけ残す
+    _resolve(found)
+
+    # ③渡された順に積む
+    for _path, result, rows in found:
+        tally.add(rows, result.line)
+
     # **ラインごとに埋めます。** 上詰めもロット単位も「上の行」を見るので、
     # 混ぜたまま埋めると板の行に機側の値が入ります
     for line, rows in tally.groups().items():
         _fill_all(rows, line)
     return tally
+
+
+def _resolve(found: list) -> None:
+    """重なった日を間引く。**元に近いほうを残し、飛ばしたほうは理由を言う。**
+
+    `found` の中身(行の並びと `SheetResult`)をその場で直します。
+    """
+    best: dict[tuple[str, str], int] = {}
+    for _path, result, rows in found:
+        for row in rows:
+            key = (row[0] if row else "", result.line)
+            best[key] = min(best.get(key, result.priority), result.priority)
+
+    #: 日 → (その日を取った相手の番号, 画面に出す名前)
+    taken: dict[tuple[str, str], tuple[int, str]] = {}
+    for place, (path, result, rows) in enumerate(found):
+        kept, same = [], []
+        label = f"{result.kind}({path.name})"
+        for row in rows:
+            key = (row[0] if row else "", result.line)
+            holder = taken.get(key)
+            if holder is not None and holder[0] == place:
+                kept.append(row)                  # **同じ相手の続きの行**
+                continue
+            if holder is None and best.get(key, result.priority) == result.priority:
+                taken[key] = (place, label)
+                kept.append(row)
+                continue
+            winner = holder[1] if holder else "もっと元に近いもの"
+            if winner not in same:
+                same.append(winner)
+        found[place] = (path, result, kept)
+        result.rows = len(kept)
+        if not same:
+            continue
+        told = "／".join(same)
+        if kept:
+            result.note = (f"同じ日のぶんは {told} から拾っています"
+                           "(二重に数えないよう、重なった日は飛ばしました)")
+        else:
+            result.skipped = (f"同じ日のぶんを {told} から拾っています。"
+                              "二重に数えないよう、こちらは飛ばしました")
 
 
 # ------------------------------------------------------------------
@@ -1063,6 +1152,17 @@ def _dates_of(rows: list) -> list[str]:
         if row and row[0] and row[0] not in found:
             found.append(row[0])
     return found
+
+
+def write_rows(rows: list, line: str, out_dir) -> Path:
+    """拾った行を、そのラインの並びで**1本書く**。
+
+    変換のときに「その日の集計の材料」を残すために使います
+    (`converter/run.py`)── 形は機側データ集計のCSVそのままなので、
+    集計タブはそれをそのまま積めます。
+    """
+    return write_csvs(Tally(rows=list(rows), lines=[line] * len(rows)),
+                      out_dir)[0]
 
 
 def write_csv(tally: Tally, out_dir) -> Path:

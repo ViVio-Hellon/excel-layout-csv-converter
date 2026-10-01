@@ -148,6 +148,81 @@ class ConvertTests(unittest.TestCase):
                 self.assertTrue(found.files[0].verify.ok)
 
 
+class TallyMaterialTests(unittest.TestCase):
+    """変換が残す**5本目** ── 機側データ集計の材料
+
+    4本組は日報管理ツールが持っている欄だけです(停止は**記号**で、内訳名は
+    ありません)。それだけを材料にすると、**同じシートなのに集計の答えが
+    変わります**(ブックから集計すると内訳側、CSVから集計すると記号側)。
+    シートから直に拾ったものを一緒に残せば、どちらから集計しても同じです。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def convert(self, cells: dict | None = None, *, name: str = "2026年8月23日_機側"):
+        from converter import run
+        from tests._fixture import tally_sheet
+
+        books = self.tmp / "books"
+        books.mkdir(parents=True, exist_ok=True)
+        body = {8: {"D": "L1", "L": "9", "M": "0", "J": "8", "K": "0",
+                    "I": "12", "Y": "10", "Z": "1000", "AC": "60",
+                    "S": "材料待ち", "T": "30", "AJ": "ヲ", "AK": "30"}}
+        sheet = tally_sheet(cells or body, E1="2026年8月23日", E2="機側",
+                            AA8="作業者A")
+        write_xlsx(books / "a.xlsx", sheet, name=name)
+        out = self.tmp / "out"
+        run.convert([books], out, line="LS")
+        return out
+
+    def test_日付フォルダに材料も残す(self) -> None:
+        out = self.convert()
+        made = list(out.rglob("機側データ集計_*.csv"))
+        self.assertEqual(len(made), 1, [p.name for p in made])
+        self.assertEqual(made[0].name, "機側データ集計_LS_2026.08.23.csv")
+        # 4本組と同じ日付フォルダに置きます(フォルダごとドラッグできるように)
+        self.assertTrue((made[0].parent / "集計明細_2026-08-23_LS.csv").is_file())
+
+    def test_材料から集計するとブックと同じ(self) -> None:
+        """**ここが肝です。** シートA → CSVA → 集計A が、シートA → 集計A と同じ。"""
+        from converter import tally
+
+        out = self.convert()
+        book = next((self.tmp / "books").glob("*.xlsx"))
+        folder = sorted(next(out.rglob("機側データ集計_*.csv")).parent.glob("*.csv"))
+        self.assertEqual(tally.build([book]).rows, tally.build(folder).rows)
+
+    def test_集計明細と二重に数えない(self) -> None:
+        """日付フォルダには材料と集計明細の両方が入っています。"""
+        from converter import tally
+
+        out = self.convert()
+        folder = sorted(next(out.rglob("機側データ集計_*.csv")).parent.glob("*.csv"))
+        found = tally.build(folder)
+        self.assertEqual(len(found.rows), 1)
+        skipped = [s for s in found.sheets if s.kind == "CSV(集計明細)"]
+        self.assertTrue(skipped[0].skipped)
+        self.assertIn("二重に数えない", skipped[0].skipped)
+
+    def test_材料が拾えなくても変換は止まらない(self) -> None:
+        """停止2枠など、集計の材料にならないシートもあります。"""
+        from tests._fixture import day_sheet
+
+        books = self.tmp / "books2"
+        books.mkdir(parents=True, exist_ok=True)
+        write_xlsx(books / "a.xlsx", day_sheet())     # A1が「集計」でない
+        from converter import run
+        out = self.tmp / "out2"
+        found = run.convert([books], out, line="HVC")
+        self.assertTrue(found.files[0].ok, found.files[0].error)
+        self.assertEqual(found.files[0].tally_rows, 0)
+        self.assertEqual(list(out.rglob("機側データ集計_*.csv")), [])
+        self.assertTrue(list(out.rglob("集計明細_*.csv")))
+
+
 class StopNameTests(unittest.TestCase):
     """停止の「内訳」名 ── **停止内訳CSVがあれば、マスタより先に読みます。**
 

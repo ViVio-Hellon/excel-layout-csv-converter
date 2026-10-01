@@ -387,9 +387,27 @@ class Runner:
                 job.done = index
                 job.current = path.name
 
+        def retell(found) -> None:
+            """読み終えたあとの結果で、一覧を書き直す。
+
+            **重なった日を間引いたのは読み終えてから**です(どれが元に近いかは
+            全部読まないと決まらない)。読んでいる途中の行数のままだと、
+            飛ばしたぶんが一覧に残ります。
+            """
+            with self._lock:
+                job.files = [
+                    FileRow(name=(f"{one.file} / {one.sheet}"
+                                  if one.sheet and one.sheet != one.file
+                                  else (one.file or one.sheet)),
+                            ok=bool(one.taken), report_date=one.date,
+                            rows=one.rows, error=one.skipped, note=one.note,
+                            verify=one.kind, verify_ok=bool(one.taken))
+                    for one in found.sheets]
+
         try:
             found = tally_mod.build(sources, on_file=on_file,
                                     any_sheet=job.any_sheet)
+            retell(found)
             made = (tally_mod.write_csvs(found, job.out_dir)
                     if found.rows and not job.dry_run else [])
             path = made[0] if made else None
