@@ -25,7 +25,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import check
+from . import check, totals, workday
 
 #: 読む拡張子。`.xls`(古い形式)は ZIP ではないので読めません
 SUFFIXES = (".xlsx", ".xlsm")
@@ -43,6 +43,8 @@ class FileResult:
     pages: int = 0
     rows: int = 0
     error: str = ""
+    #: 読むときに手を入れたこと(作業日の書き方を直した、など)。**黙って直さない**
+    note: str = ""
     verify: check.Report = field(default_factory=check.Report)
 
     @property
@@ -126,7 +128,15 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
         for book in books:
             one = FileResult(path=book, name=book.name)
             try:
-                head = nippou_sheet.read_file_head(book)
+                # **1冊につき1回だけ読みます。** 頭・明細・検算で3回開いて
+                # いたのを1回にまとめています(共有フォルダでは往復が効く)
+                sheet_name = xlsx_sheet.sheet_name(book)
+                rows = xlsx_sheet.rows_of(xlsx_sheet.read_cells(book))
+                # 作業日が `2025/7/15` のような書き方のブックがあります。
+                # **同じ日付**なので、読める形に直してから渡します
+                rows, one.note = workday.fix_rows(rows, sheet_name)
+
+                head = nippou_sheet.read_head(rows, sheet_name)
                 one.report_date = head.report_date
                 one.line_text = head.line_text
                 one.line = line or nippou_sheet.guess_line(head.line_text)
@@ -135,22 +145,29 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
                         f"ラインが決まりません(シートの呼び名: "
                         f"{head.line_text or '(空)'})。--line で指定してください")
 
-                parsed = nippou_sheet.parse_file(book, one.line)
+                parsed = nippou_sheet.parse_rows(rows, one.line, sheet_name)
                 if parsed.problems:
-                    raise ValueError("／".join(p.message for p in parsed.problems))
+                    # **理由をそのまま出します。** ここは以前 `p.message` を
+                    # 読んでいて、属性が無いために本当の理由が
+                    # `'Problem' object has no attribute 'message'` に
+                    # すり替わっていました(「読めなかった、原因不明」の正体)
+                    raise ValueError("／".join(
+                        f"{p.reason}({p.row}行目)" if getattr(p, "row", 0)
+                        else str(p.reason) for p in parsed.problems))
 
                 one.pages = len(parsed.pages)
                 one.rows = sum(len(p.details) for p in parsed.pages)
 
-                # **座標が合っていたかを、ここで確かめます**
-                rows = xlsx_sheet.rows_of(xlsx_sheet.read_cells(book))
-                sheet = nippou_sheet.read_totals(rows)
+                # **座標が合っていたかを、ここで確かめます。** 合計欄は
+                # 「空欄」と「0」を区別して拾います(`converter/totals`) ──
+                # 空欄を0として比べると、読み取りが合っているのに
+                # 「ずれている」と言ってしまうので
+                sheet = totals.read(rows)
                 read_by_shift, read_stops = _totals_of(parsed.pages)
                 one.verify = check.build(
                     book.name,
                     read_by_shift=read_by_shift, read_stops=read_stops,
-                    sheet_by_shift=sheet.by_shift,
-                    sheet_day=(sheet.day_count, sheet.day_weight),
+                    sheet_by_shift=sheet.by_shift, sheet_day=sheet.day,
                     sheet_stops=sheet.stops)
 
                 for page in parsed.pages:

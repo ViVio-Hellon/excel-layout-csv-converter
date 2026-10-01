@@ -114,6 +114,9 @@ def main(argv=None) -> int:
         print(f"{head} {mark} {one.report_date} "
               f"{one.line_text}→{one.line} "
               f"{one.pages}ページ {one.rows}行  {one.verify.summary()}")
+        if one.note:
+            # **黙って直しません。** 読むときに手を入れたことは必ず出す
+            print(f"{' ' * len(head)}   ※ {one.note}")
 
     found = run.convert(args.inputs, args.out, line=args.line,
                         dry_run=args.check, on_file=show)

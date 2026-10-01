@@ -79,11 +79,19 @@ def _row(number: int, *, lot: str, count: str, weight: str,
 
 
 def day_sheet(report_date: str = "2026年8月26日", line_text: str = "HVC", *,
-              coil: bool = False, stops_ok: bool = True) -> dict:
+              coil: bool = False, stops_ok: bool = True,
+              stop_totals: bool = True, day_stale: bool = False,
+              no_totals: bool = False) -> dict:
     """1日ぶん(3直)。**シート自身の合計も、合うように置きます。**
 
     `stops_ok=False` にすると停止の合計だけを狂わせます ── 検算が
     「合わない」と言えるかを試すため。
+
+    実物のブックに合わせて、**合計欄が揃っていない形**も作れます:
+
+    `stop_totals=False` … T4/V4/X4 を置かない(式の結果が保存されていない)
+    `day_stale=True`    … AA3/AB3 だけ古い値(合計式が計算し直されていない)
+    `no_totals=True`    … 合計欄を1つも置かない(古い形のブック)
     """
     cells = {
         "E1": report_date, "E2": line_text, "E3": "作業者A 作業者B",
@@ -105,10 +113,15 @@ def day_sheet(report_date: str = "2026年8月26日", line_text: str = "HVC", *,
                       stop=("G", "10"), coil=coil))
     cells["AA151"], cells["AB151"] = "7", "700"
     # 日計と停止3分類
-    cells["AA3"], cells["AB3"] = "42", "4200.5"
-    cells["T4"] = "30" if stops_ok else "999"    # 管理ロス(0)
-    cells["V4"] = "20"                            # 突発(タ)
-    cells["X4"] = "10"                            # ハンドリング(G)
+    cells["AA3"], cells["AB3"] = ("28", "2800") if day_stale else ("42", "4200.5")
+    if stop_totals:
+        cells["T4"] = "30" if stops_ok else "999"  # 管理ロス(0)
+        cells["V4"] = "20"                         # 突発(タ)
+        cells["X4"] = "10"                         # ハンドリング(G)
+    if no_totals:
+        for key in ("AA3", "AB3", "AA55", "AB55", "AA103", "AB103",
+                    "AA151", "AB151", "T4", "V4", "X4"):
+            cells.pop(key, None)
     return cells
 
 

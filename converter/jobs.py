@@ -75,6 +75,8 @@ class FileRow:
     rows: int = 0
     error: str = ""
     verify: str = ""
+    #: 読むときに手を入れたこと(作業日の書き方を直した、など)。**黙って直さない**
+    note: str = ""
     marks: list[str] = field(default_factory=list)
 
     @property
@@ -314,6 +316,7 @@ class Runner:
                 verify_ok=bool(one.ok and one.verify.ok),
                 no_totals=bool(getattr(one.verify, "no_totals", False)),
                 verify=one.verify.summary() if one.ok else "",
+                note=getattr(one, "note", ""),
                 marks=[l.text() for l in getattr(one.verify, "lines", [])
                        if not l.ok])
             with self._lock:

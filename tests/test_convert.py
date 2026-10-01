@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT / "vendor"))
 # 1行だけ出します)
 logging.getLogger("nippou").setLevel(logging.CRITICAL)
 
-from converter import check, run                 # noqa: E402
+from converter import check, run, totals         # noqa: E402
 from tests._fixture import day_sheet, write_xlsx  # noqa: E402
 
 
@@ -183,6 +183,37 @@ class VerifyTests(unittest.TestCase):
         self.assertIn("日計 枚数", what)
         self.assertIn("停止 合計(分)", what)
 
+    def test_シートが持っていない合計は比べない(self) -> None:
+        """**空欄を0として比べると、読み取りが合っているのに×になります。**
+
+        実物の2025年のブックは T4/V4/X4(停止の合計)が空のままでした。
+        空欄を0とみなすと「停止 合計(分): 読んだ数 60 / シート 0 ×」。
+        読めているのにずれていると言うのは、いちばん悪い嘘です。
+        """
+        one = self.run_one(stop_totals=False)
+        self.assertTrue(one.verify.ok, one.verify.summary())
+        self.assertIn("停止 合計(分)", one.verify.skipped)
+        self.assertNotIn("停止 合計(分)",
+                         [line.what for line in one.verify.lines])
+        self.assertIn("比べていない項目", one.verify.summary())
+
+    def test_シートの日計が古ければシートの食い違いとして言う(self) -> None:
+        """直合計は合っているのに日計だけ古いブックがありました。
+
+        **責めるべきは読み取りではなくシート。** 直合計の足し算と比べ、
+        食い違いは言っておきます(黙って直合計に差し替えません)。
+        """
+        one = self.run_one(day_stale=True)
+        self.assertTrue(one.verify.ok, one.verify.summary())
+        self.assertTrue(one.verify.notes)
+        self.assertIn("食い違っています", one.verify.summary())
+        self.assertIn("合計式", one.verify.summary())
+
+    def test_合計が1つも無ければ丸にしない(self) -> None:
+        one = self.run_one(no_totals=True)
+        self.assertTrue(one.verify.no_totals)
+        self.assertFalse(one.verify.ok)
+
 
 class CheckLogicTests(unittest.TestCase):
     """突き合わせの決まり(`converter/check.py`)。**純粋な部分。**"""
@@ -204,15 +235,90 @@ class CheckLogicTests(unittest.TestCase):
         """**確かめていないことを、確かめたことにしない。**"""
         report = check.build("x", read_by_shift={"1直": (5.0, 100.0)},
                              read_stops=0.0, sheet_by_shift={},
-                             sheet_day=(0.0, 0.0), sheet_stops={})
+                             sheet_day=(None, None), sheet_stops={})
         self.assertTrue(report.no_totals)
         self.assertFalse(report.ok)
         self.assertIn("突き合わせられません", report.summary())
+
+    def test_空欄と0は別のもの(self) -> None:
+        """シートの0は**0として比べます**。空欄は比べません。"""
+        zero = check.build("x", read_by_shift={}, read_stops=60.0,
+                           sheet_by_shift={}, sheet_day=(None, None),
+                           sheet_stops={"管理ロス停止": 0.0, "突発停止": 0.0,
+                                        "ハンドリング停止": 0.0})
+        self.assertFalse(zero.ok)
+        self.assertIn("停止", zero.summary())
+
+        empty = check.build("x", read_by_shift={"1直": (5.0, 100.0)},
+                            read_stops=60.0,
+                            sheet_by_shift={"1直": (5.0, 100.0)},
+                            sheet_day=(None, None),
+                            sheet_stops={"管理ロス停止": None, "突発停止": None,
+                                         "ハンドリング停止": None})
+        self.assertTrue(empty.ok, empty.summary())
+        self.assertIn("停止 合計(分)", empty.skipped)
+
+    def test_停止が3つ揃っていなければ比べない(self) -> None:
+        """**足せた分だけ比べると嘘になります**(1つ欠けたら比べない)。"""
+        report = check.build("x", read_by_shift={"1直": (5.0, 100.0)},
+                             read_stops=60.0,
+                             sheet_by_shift={"1直": (5.0, 100.0)},
+                             sheet_day=(5.0, 100.0),
+                             sheet_stops={"管理ロス停止": 30.0, "突発停止": 30.0,
+                                          "ハンドリング停止": None})
+        self.assertTrue(report.ok, report.summary())
+        self.assertIn("停止 合計(分)", report.skipped)
+
+    def test_日計が空なら日計は比べない(self) -> None:
+        """**直合計で済ませて「日計も合った」とは言いません。**
+
+        直合計の足し算と比べれば○は出せますが、それは直合計の行で
+        すでに確かめたことです。シートが持っていないものを持っていた
+        ことにはしません ── 比べていないと言います。
+        """
+        report = check.build("x", read_by_shift={"1直": (5.0, 100.0),
+                                                "2直": (7.0, 200.0)},
+                             read_stops=0.0,
+                             sheet_by_shift={"1直": (5.0, 100.0),
+                                             "2直": (7.0, 200.0)},
+                             sheet_day=(None, None), sheet_stops={})
+        self.assertTrue(report.ok, report.summary())
+        self.assertIn("日計 枚数", report.skipped)
+        self.assertIn("日計 重量", report.skipped)
+        self.assertFalse(report.notes)
 
     def test_読めない字は0として扱う(self) -> None:
         self.assertEqual(check.to_number("あ"), 0.0)
         self.assertEqual(check.to_number(None), 0.0)
         self.assertEqual(check.to_number(" 12.5 "), 12.5)
+
+
+class TotalsTests(unittest.TestCase):
+    """合計欄の拾い方(`converter/totals.py`)。**空欄は `None`。**"""
+
+    def test_空欄と読めない字は無しにする(self) -> None:
+        self.assertIsNone(totals.number_or_none(""))
+        self.assertIsNone(totals.number_or_none(None))
+        self.assertIsNone(totals.number_or_none("  "))
+        self.assertIsNone(totals.number_or_none("#VALUE!"))
+        self.assertEqual(totals.number_or_none("0"), 0.0)
+        self.assertEqual(totals.number_or_none(" 12.5 "), 12.5)
+
+    def test_シートから拾う(self) -> None:
+        rows = {3: {"AA": "42", "AB": "4200.5"},
+                4: {"T": "30", "V": "20"},            # X4 は空
+                55: {"AA": "30", "AB": "3000"},
+                103: {"AA": "5", "AB": "500.5"},
+                151: {"AA": "7", "AB": "700"}}
+        found = totals.read(rows)
+        self.assertEqual(found.day, (42.0, 4200.5))
+        self.assertEqual(found.by_shift["1直"], (30.0, 3000.0))
+        self.assertEqual(found.stops["管理ロス停止"], 30.0)
+        self.assertIsNone(found.stops["ハンドリング停止"])
+        self.assertFalse(found.nothing)
+
+    def test_1つも無いときは無しと言える(self) -> None:
+        self.assertTrue(totals.read({}).nothing)
 
 
 class CommandTests(unittest.TestCase):

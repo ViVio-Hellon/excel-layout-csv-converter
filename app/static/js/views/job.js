@@ -133,9 +133,7 @@ function renderResult(job, tally) {
       : [[file.mark, "mark"], [file.name, ""], [file.report_date, ""],
          [(file.line_text ? file.line_text + "→" : "") + file.line, ""],
          [file.pages || "", "num"], [file.rows || "", "num"],
-         [(file.ok
-           ? (file.marks && file.marks.length ? file.marks.join(" ／ ") : file.verify)
-           : file.error) || "", "detail"]];
+         [detail(file), "detail"]];
     cells.forEach((cell) => {
       const td = document.createElement("td");
       td.className = cell[1];
@@ -144,6 +142,16 @@ function renderResult(job, tally) {
     });
     body.appendChild(row);
   });
+}
+
+// 詳細欄。**読むときに手を入れたこと(note)は必ず出します** ──
+// 作業日の書き方を直した、など。黙って直したことにしません
+function detail(file) {
+  if (!file.ok) { return file.error || ""; }
+  const marks = file.marks && file.marks.length
+    ? file.marks.join(" ／ ") : (file.verify || "");
+  return file.note ? (marks ? marks + " ／ ※" + file.note : "※" + file.note)
+    : marks;
 }
 
 function begin(payload) {
