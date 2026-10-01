@@ -326,6 +326,37 @@ class VerifyTests(unittest.TestCase):
         self.assertIn("日計 枚数", what)
         self.assertIn("停止 合計(分)", what)
 
+    def test_停止は振り分け後を数える(self) -> None:
+        """**振り分け前(AJ列から右)は数えません。**
+
+        記号のまま先に書き込む作業用の欄で(`AJ4` に「振り分け前」)、
+        書き損じも入り得ます。シート自身の合計(T4/V4/X4)も振り分け後
+        (S〜X)を数えているので、こちらと突き合わせないと別のものを
+        比べることになります。
+        """
+        from converter import totals
+
+        cells = day_sheet()
+        # 振り分け前だけを狂わせる(用途名が紛れ込んだ、などの書き損じ)
+        cells["AK8"] = "999"
+        cells["AL8"] = "ヨ"
+        cells["AM8"] = "888"
+        write_xlsx(self.tmp / "a.xlsx", cells)
+        found = run.convert([self.tmp], self.tmp / "out", line="HVC",
+                            dry_run=True)
+        one = found.files[0]
+        self.assertTrue(one.verify.ok, one.verify.summary())
+        line = [l for l in one.verify.lines if l.what.startswith("停止")][0]
+        self.assertEqual(line.read, 60)            # 30 + 20 + 10(振り分け後)
+        self.assertEqual(line.sheet, 60)
+
+    def test_振り分け後の時間だけを足す(self) -> None:
+        from converter import totals
+
+        rows = {8: {"T": "30", "AK": "999"}, 9: {"V": "20"}, 10: {"X": "10"},
+                151: {"T": "5"}, 152: {"T": "100"}}   # 152行目は明細の外
+        self.assertEqual(totals.stop_minutes(rows), 65)
+
     def test_シートが持っていない合計は比べない(self) -> None:
         """**空欄を0として比べると、読み取りが合っているのに×になります。**
 

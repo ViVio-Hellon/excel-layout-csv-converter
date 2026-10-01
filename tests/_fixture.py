@@ -74,8 +74,13 @@ def _row(number: int, *, lot: str, count: str, weight: str,
         f"AC{number}": "60", f"AD{number}": "100",
     }
     if stop[0]:
+        # **実物と同じく、停止は2か所に入ります。**
+        #   AJ〜AO … 「振り分け前」(記号のまま先に書き込む欄。`AJ4` の帯)
+        #   S〜X   … 振り分け後(停止名+時間)。シート自身の合計はこちら側
         cells[f"AJ{number}"] = stop[0]
         cells[f"AK{number}"] = stop[1]
+        cells[f"S{number}"] = f"停止{stop[0]}"
+        cells[f"T{number}"] = stop[1]
     if coil:
         # コイルだけが使う欄(板では空)
         cells[f"AQ{number}"] = "2"

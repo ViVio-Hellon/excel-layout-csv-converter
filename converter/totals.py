@@ -73,6 +73,33 @@ def number_or_none(text) -> float | None:
         return None
 
 
+#: 停止の「振り分け後」── 内訳名と時間の対(作業停止内訳-1/2/3)
+#:
+#: シートは停止を2か所に持っています。**AJ列から右は「振り分け前」**で
+#: (`AJ4` にそう書いてあります)、記号のまま先に書き込む欄です。左の
+#: S〜X がそれを停止名に振り分けたもので、**シート自身の合計
+#: (T4/V4/X4 = 管理ﾛｽ/段取り・突発/ﾊﾝﾄﾞﾘﾝｸﾞ)もこちら側**を数えています。
+#:
+#: だから検算もこちら側で数えます ── 振り分け前は作業用の欄で、
+#: 書き損じ(用途名が入っているなど)もあり得るので数えません。
+STOP_PAIRS: tuple[tuple[str, str], ...] = (("S", "T"), ("U", "V"), ("W", "X"))
+
+#: 明細の範囲(見出しの下から、3直の終わりまで)
+FIRST_ROW, LAST_ROW = 8, 151
+
+
+def stop_minutes(rows: dict[int, dict[str, str]]) -> float:
+    """**振り分け後**の停止時間の合計(分)。シートの T4/V4/X4 と比べる相手。"""
+    found = 0.0
+    for number in range(FIRST_ROW, LAST_ROW + 1):
+        values = rows.get(number, {})
+        for _name, minutes in STOP_PAIRS:
+            value = number_or_none(values.get(minutes, ""))
+            if value is not None:
+                found += value
+    return found
+
+
 def read(rows: dict[int, dict[str, str]]) -> SheetTotals:
     """合計欄を拾う。**シートの中身は変えません。**"""
     from nippou.logic.nippou_sheet import SHIFT_BANDS

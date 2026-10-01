@@ -87,22 +87,23 @@ def gather(inputs) -> list[Path]:
     return found
 
 
-def _totals_of(pages) -> tuple[dict, float]:
-    """読んだ明細を、直ごとの(枚数, 重量)と停止の合計に畳む。"""
+def _totals_of(pages) -> dict:
+    """読んだ明細を、直ごとの(枚数, 重量)に畳む。
+
+    **停止はここで数えません。** 日報が持っているのはシートの
+    「振り分け前」(AJ列から右の記号+時間)で、シート自身の合計
+    (T4/V4/X4)は「振り分け後」(S〜X)を数えているためです ── 別のものを
+    突き合わせることになります(`converter/totals.stop_minutes`)。
+    """
     by_shift: dict[str, tuple[float, float]] = {}
-    stops = 0.0
     for page in pages:
         shift = page.header.shift
         count, weight = by_shift.get(shift, (0.0, 0.0))
         for row in page.details:
             count += check.to_number(row.con)
             weight += check.to_number(row.wei)
-            for code, minutes in ((row.s, row.th), (row.ss, row.ths),
-                                  (row.sth, row.tht)):
-                if str(code).strip():
-                    stops += check.to_number(minutes)
         by_shift[shift] = (count, weight)
-    return by_shift, stops
+    return by_shift
 
 
 def _tally_material(sheet, line: str, report_date: str, material: dict) -> int:
@@ -204,10 +205,13 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
                 # 空欄を0として比べると、読み取りが合っているのに
                 # 「ずれている」と言ってしまうので
                 sheet = totals.read(rows)
-                read_by_shift, read_stops = _totals_of(parsed.pages)
                 one.verify = check.build(
                     book.name,
-                    read_by_shift=read_by_shift, read_stops=read_stops,
+                    read_by_shift=_totals_of(parsed.pages),
+                    # **停止は振り分け後(S〜X)を数えます。** 振り分け前
+                    # (AJ列から右)は記号のまま先に書き込む作業用の欄で、
+                    # シート自身の合計もそちらは数えていません
+                    read_stops=totals.stop_minutes(rows),
                     sheet_by_shift=sheet.by_shift, sheet_day=sheet.day,
                     sheet_stops=sheet.stops)
 
