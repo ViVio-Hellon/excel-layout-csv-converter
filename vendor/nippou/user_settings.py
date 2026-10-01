@@ -45,9 +45,53 @@ def load_all() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _is_set(value: Any) -> bool:
+    """値が入っているか。**空文字は「既定に戻した」印**なので入っていない。"""
+    if value is None:
+        return False
+    return not (isinstance(value, str) and not value.strip())
+
+
 def get(key: str, default: Any = None) -> Any:
-    """VBA `GetSetting` 相当。"""
-    return load_all().get(key, default)
+    """VBA `GetSetting` 相当。**端末の値 → 配布設定 → `default`。**
+
+    端末で変えていなければ、起動用の Start.vbs と同じフォルダの
+    `配布設定\\設定.json`(`distribution`)を見ます。起動時の読み込みで
+    端末に写るので普段はそちらが効きますが、写す前(起動の途中)や写せ
+    なかったときも同じ値で動くように。そこにも無ければこれまでどおり。
+    """
+    data = load_all()
+    mine = data.get(key)
+    if _is_set(mine):
+        return mine
+    from . import distribution
+
+    shared = distribution.value(key)
+    if shared is not None:
+        return shared
+    return data.get(key, default)
+
+
+# 値の出どころ。設定画面が「配布設定の値」の札を付けるのに使う
+ORIGIN_TERMINAL = "terminal"
+ORIGIN_SITE = "site"
+
+
+def origin(key: str) -> str:
+    """その値はどこから来たか ── 端末 / 配布設定 / どちらでもない(空)。
+
+    **配布設定から読み込んだ値は「配布設定」と言う。** 起動時の読み込み
+    (`distribution.apply_on_start`)で端末の設定に写るので、そのままでは
+    「端末で変えた値」と見分けが付きません。配布設定と同じ値なら
+    配布設定から、と数えます。
+    """
+    from . import distribution
+
+    mine = load_all().get(key)
+    shared = distribution.value(key)
+    if _is_set(mine):
+        return ORIGIN_SITE if shared is not None and mine == shared else ORIGIN_TERMINAL
+    return ORIGIN_SITE if shared is not None else ""
 
 
 def save(key: str, value: Any) -> bool:

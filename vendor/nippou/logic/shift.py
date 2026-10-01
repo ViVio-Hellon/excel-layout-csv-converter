@@ -14,6 +14,7 @@ importer keeps in sync (see ``db/repository.py``).
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Optional
@@ -33,6 +34,8 @@ SHIFT_3 = "3直"
 SHIFT_NAMES: tuple[str, ...] = (SHIFT_1, SHIFT_2, SHIFT_3, DAY_SHIFT)
 
 _BUSINESS_DATE_RE = re.compile(r"(\d+)年(\d+)月(\d+)日")
+#: 年を落とした言い方を拾う。**年が無い書き方でも拾えるように**別に持つ
+_SHORT_DATE_RE = re.compile(r"(\d+)月(\d+)日")
 
 
 def parse_business_date(text: str) -> Optional[date]:
@@ -57,8 +60,82 @@ def parse_business_date(text: str) -> Optional[date]:
         return None
 
 
+def short_date(report_date: str) -> str:
+    """「2026年9月12日」→「9月12日」。読めない形なら空。
+
+    帯や札の**主語**に使います。年まで出すと長すぎて読み飛ばされる
+    ので、月日だけ ── 同じ日のまわりのことしか出ないので足ります。
+
+    ここに置いてあるのは、**主語の書き方を1か所にする**ためです
+    (紙の束・引き継ぎの帯・この直の帯が、別々の書き方をすると
+    同じ日のことだと読めません)。
+    """
+    found = _SHORT_DATE_RE.search(report_date or "")
+    return f"{found.group(1)}月{found.group(2)}日" if found else ""
+
+
+def about_shift(report_date: str, shift: str) -> str:
+    """「9月12日 1直」── **この知らせはどの直のことか。**
+
+    どちらが欠けていても、あるほうだけを返します(作りません)。
+    """
+    return " ".join(part for part in (short_date(report_date),
+                                      (shift or "").strip()) if part)
+
+
+#: 「時:分」。秒が付いていても読む(Access の日付時刻型を文字にすると
+#: `7:00:00` になる)。秒は捨てます ── 直の境界に秒の意味はありません
+_HHMM_RE = re.compile(r"(\d{1,2}):(\d{2})(?::\d{2})?")
+
+
+def normalize_hhmm(value: object) -> str:
+    """「7:00」「０７：００」「07:00:00」→「07:00」。**読めなければ空。**
+
+    直の時刻を読むところは、ここを通してから使います。
+
+        マスタ管理で直せるようになった
+          → 「7時」「25:00」が入りうる
+          → `time(int(hh), int(mm))` がどの画面でも例外
+          → 帯も日報入力も GW も 500
+
+    しかも時刻は**起動のたびにマスタから読み直す**ので、起動し直しても
+    逃げられません。読めない値は「無い」と同じに扱い、控えの時刻へ落として
+    帯で知らせます(`shift_times_note`)。
+
+    全角で打たれても読みます(`NFKC`)── 日本語入力のまま数字を打つと
+    全角になり、見た目では区別がつきません。
+    """
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    found = _HHMM_RE.fullmatch(text)
+    if not found:
+        return ""
+    hour, minute = int(found.group(1)), int(found.group(2))
+    if hour > 23 or minute > 59:
+        return ""
+    return f"{hour:02d}:{minute:02d}"
+
+
+def usable_pair(found: object) -> Optional[tuple[str, str]]:
+    """マスタの1直ぶん `(開始, 終了)` が使えるなら、揃えた形で返す。
+
+    **片側でも欠けているか、時:分として読めなければ None。** 読む側
+    (`app/routes/entry.build_shift_calculator` / `services/shift_check.bounds_of`
+    / `missing_shift_times`)は、みなここで決めます ── 決め方が
+    ばらばらだと、同じ直の終わりを画面ごとに違う時刻で見ることになります。
+    """
+    if not isinstance(found, (tuple, list)) or len(found) < 2:
+        return None
+    start, end = normalize_hhmm(found[0]), normalize_hhmm(found[1])
+    if not (start and end):
+        return None
+    return start, end
+
+
 def _parse_hhmm(value: str) -> time:
-    hh, mm = value.split(":")
+    text = normalize_hhmm(value)
+    if not text:
+        raise ValueError(f"時:分として読めません: {value!r}")
+    hh, mm = text.split(":")
     return time(int(hh), int(mm))
 
 
@@ -70,20 +147,42 @@ def _parse_hhmm(value: str) -> time:
 MASTER_KEYS: tuple[tuple[str, str], ...] = (("1", "1直"), ("2", "2直"),
                                             ("3", "3直"))
 
+#: 形を確かめる直。**こちらは日勤も見ます** ── 入っていないのは普通でも、
+#: 入っているのに読めないのは誰かの打ち間違いです
+FORM_KEYS: tuple[tuple[str, str], ...] = MASTER_KEYS + (("昼", DAY_SHIFT),)
+
 
 def missing_shift_times(raw: dict[str, tuple[str, str]]) -> list[str]:
     """**マスタから読めていない直**の名前。空なら3直ぶんとも本物。
 
-    片側だけ入っているもの(`("15:00", "")`)も読めていない扱いにします
-    ── 読む側(`build_shift_calculator` / `shift_check.bounds_of`)が
-    どちらも「片側でも欠ければ控えに落とす」ので、それに合わせます。
+    片側だけ入っているもの(`("15:00", "")`)も、時:分として読めない
+    もの(`("7時", "15:00")`)も読めていない扱いにします ── 読む側
+    (`build_shift_calculator` / `shift_check.bounds_of`)がどちらも
+    `usable_pair` で「使えなければ控えに落とす」ので、それに合わせます。
     """
     missing = []
     for key, name in MASTER_KEYS:
-        found = (raw or {}).get(key)
-        if not (found and found[0] and found[1]):
+        if usable_pair((raw or {}).get(key)) is None:
             missing.append(name)
     return missing
+
+
+def malformed_shift_times(raw: dict[str, tuple[str, str]]) -> list[str]:
+    """**入っているのに時:分として読めない**直の名前(日勤も含む)。
+
+    「無い」と「形が違う」は、直す場所が違います。無いなら取り込めば
+    済みますが、形が違うなら取り込み直しても同じ値が来ます ──
+    マスタのほうを直すしかありません。
+    """
+    bad = []
+    for key, name in FORM_KEYS:
+        found = (raw or {}).get(key)
+        if not found:
+            continue
+        written = [str(v or "").strip() for v in tuple(found)[:2]]
+        if any(v and not normalize_hhmm(v) for v in written):
+            bad.append(name)
+    return bad
 
 
 def shift_times_note(raw: dict[str, tuple[str, str]]) -> str:
@@ -98,7 +197,15 @@ def shift_times_note(raw: dict[str, tuple[str, str]]) -> str:
 
     値を合わせても同じことです ── **合っている保証がどこにも無い**のが
     問題なので、出どころのほうを画面に出します。
+
+    **形が違う値が入っているときは、直す場所のほうを言います。**
+    「取り込む」を押しても同じ値がまた来るだけなので。
     """
+    malformed = malformed_shift_times(raw)
+    if malformed:
+        return (f"直の時刻が 時:分 の形になっていません({'・'.join(malformed)})。"
+                "その直は控えの時刻で動いています ── 設定・管理者 →「マスタ」"
+                "→「表を見る / 直す」の 時間用 を 07:00 の形に直してください。")
     missing = missing_shift_times(raw)
     if not missing:
         return ""
@@ -147,6 +254,20 @@ class ShiftTimes:
 
 
 DEFAULT_SHIFT_TIMES = ShiftTimes()
+
+
+def default_times_text(times: ShiftTimes = DEFAULT_SHIFT_TIMES) -> str:
+    """控えの時刻を1行で。「1直 07:00-15:00 / … / 日勤 07:00-17:00」。
+
+    画面に控えの時刻を書くところは**ここから取ります。** 手で書き写すと、
+    控えを直したときに画面だけが古い時刻を言い続けます(設定画面の
+    「直の境界時刻」は、控えを 07:00 始まりに直したあとも 08:00 と
+    言っていました)。
+    """
+    return " / ".join(f"{name} {start}-{end}" for name, start, end in (
+        (SHIFT_1, times.start1, times.end1), (SHIFT_2, times.start2, times.end2),
+        (SHIFT_3, times.start3, times.end3),
+        (DAY_SHIFT, times.start_day, times.end_day)))
 
 
 class ShiftCalculator:

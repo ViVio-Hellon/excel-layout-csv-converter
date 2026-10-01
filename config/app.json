@@ -1,7 +1,7 @@
 {
   "app_id": "nlm.excel-csv-converter",
   "display_name": "エクセル → CSV 変換器",
-  "version": "1.3.3",
+  "version": "1.4.0",
   "monitor_level": 2,
   "local_dir_name": "ExcelCsvConverter",
 
@@ -26,6 +26,7 @@
     "input_dir": "",
     "output_dir": "",
     "line": "",
-    "ref_dir": ""
+    "ref_dir": "",
+    "stop_csv": ""
   }
 }

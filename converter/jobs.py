@@ -181,26 +181,14 @@ class Job:
 
 
 def master_notice() -> tuple[bool, str]:
-    """停止内訳マスタが読めるか。**読めないなら、何が空になるかまで言う。**
+    """停止内訳が読めるか。**読めないなら、何が空になるかまで言う。**
 
-    記号(`レ` `0` `G`)と分類は、マスタが無くても出ます ── 分類は記号の
-    字種で決まるので。**空になるのは「内訳」の1列だけ**です。
+    中身は `converter/stop_reasons.py` に1つだけ持っています ── CLIと
+    画面で違う言葉を出さないため。出どころは**停止内訳CSVと参照用マスタ**の
+    2つで、分類ごとにCSVが優先です。
     """
-    from nippou.access_bridge import stop_master
-    from nippou.config import SETTINGS
-
-    path = SETTINGS.stop_reason_master_path
-    try:
-        by_category = stop_master.load_all_categories()
-        codes = {r.code for items in by_category.values()
-                 for r in items if r.code}
-    except Exception:                             # noqa: BLE001 - 変換は続ける
-        codes = set()
-    if codes:
-        return True, f"停止内訳マスタ: {path}({len(codes)}記号)"
-    return False, (f"停止内訳マスタが読めません({path})。"
-                   "停止内訳CSVの「内訳」欄が空になります"
-                   "(記号と分類は出ます)。設定部で置き場所を指定できます")
+    from . import stop_reasons
+    return stop_reasons.notice()
 
 
 def gather(folder: str) -> list[Path]:
@@ -373,6 +361,7 @@ class Runner:
                           report_date=(result.date if result else ""),
                           rows=(result.rows if result else 0),
                           error=(result.skipped if result else "読めませんでした"),
+                          note=(result.note if result else ""),
                           verify=(result.kind if result else ""),
                           verify_ok=bool(result and result.taken))
             with self._lock:

@@ -25,7 +25,17 @@ function show(ok) {
 function beat() {
   api("/api/alive", { json: { closed: false } }).then((result) => {
     if (!result.ok) { return screen.lost(); }
-    if (result.data.screen_ok === false) { return screen.lost(); }
+    if (result.data.screen_ok === false) {
+      // **裏に回っていただけなら、黙って取り直します。**
+      // ブラウザは隠れたタブの心拍を間引く(数分で凍結する)ので、
+      // 戻ったときに占有が期限切れになっていることがあります。
+      // ほかの画面が使っていれば取り直せないので、そのときは覆いを出します
+      return screen.regain().then((again) => {
+        if (!again) { return screen.lost(); }
+        missed = 0;
+        show(true);
+      });
+    }
     missed = 0;
     show(true);
   }).catch(() => {
@@ -43,6 +53,11 @@ export function startHeartbeat() {
   beat();
   timer = setInterval(beat, window.APP.heartbeat_ms || 3000);
   window.addEventListener("xlcsv:gated", () => clearInterval(timer));
+  // **表に戻った瞬間に1回打ちます。** タイマー任せだと、戻ってから
+  // 数秒間「応答がありません」のまま見えます(凍結明けはもっと遅い)
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && screen.isActive()) { beat(); }
+  });
 }
 
 /** タブが閉じられたことを伝える。**待たずに終われるように。** */

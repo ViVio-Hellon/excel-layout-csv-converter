@@ -284,6 +284,81 @@ def day_steps(rows: list[ShiftAggregate], cumulative: float = 0.0,
 
 
 # ======================================================================
+# 期間ぶん(日も直もまたいで足したもの)
+# ======================================================================
+def period_steps(rows: list[ShiftAggregate], note: str = "") -> list[Step]:
+    """期間の数字の途中式。**その日ぶんと同じ足し方**です。
+
+        期間表示は本日系の表示を切り替えてでも
+        期間でしか見れないデータを見せるべき
+
+    数え方は `day_steps` と1つも変えません ── 変えると、同じ「稼働率」
+    が日と期間で別のものになります。違うのは**数える範囲だけ**:
+
+        その日  … その日に保存のあった直ぜんぶ
+        期間    … 開始日〜終了日に保存のあった直ぜんぶ
+
+    予定総時間(のべ時間)は **1440分 × 直数**。日数ではありません ──
+    2直しか動かなかった日を3直ぶんで割ると、稼働率が実際より低く出ます。
+    """
+    shifts = len(rows)
+    days = len({r.report_date for r in rows if r.report_date})
+    stopped = sum(r.total_stop_minutes for r in rows)
+    whole = float(MINUTES_PER_DAY * shifts)
+    weight_ton = sum(r.weight_kg for r in rows) / 1000.0
+    operating = whole - stopped
+    hours = operating / 60
+    rate = max(0.0, operating / whole * 100) if whole > 0 else 0.0
+    productivity = weight_ton / hours if hours > 0 else 0.0
+    where = note or "期間"
+
+    return [
+        Step(key="period_shifts", name="直数(期間)",
+             formula="期間に保存のあった直を数える",
+             substituted=f"{where} に {days}日ぶん",
+             result=f"{shifts} 直",
+             terms=[Term("日数", days, "日", 0, "保存済み"),
+                    Term("直数", shifts, "直", 0, "保存済み")],
+             note="日数ではなく直数で数えます ── 2直しか動かなかった日を"
+                  "3直ぶんで割ると、稼働率が実際より低く出ます"),
+        Step(key="period_whole", name="予定総時間(分)",
+             formula="1440分 × 直数",
+             substituted=f"{_num(MINUTES_PER_DAY)} × {shifts}",
+             result=f"{_num(whole)} 分",
+             terms=[Term("1440", MINUTES_PER_DAY, "分", 0, "定数(1日)"),
+                    Term("直数", shifts, "直", 0, "計算")]),
+        Step(key="period_stop", name="停止合計(分)",
+             formula="期間の停止をぜんぶ足す",
+             substituted=f"{where} の {shifts}直ぶん",
+             result=f"{_num(stopped)} 分",
+             terms=[Term("停止合計", stopped, "分", 0, "計算")]),
+        Step(key="period_operating", name="稼働時間(分)",
+             formula="予定総時間 − 停止合計",
+             substituted=f"{_num(whole)} − {_num(stopped)}",
+             result=f"{_num(operating)} 分",
+             terms=[Term("予定総時間", whole, "分", 0, "計算"),
+                    Term("停止合計", stopped, "分", 0, "計算")]),
+        Step(key="period_rate", name="稼働率(%)",
+             formula="稼働時間 ÷ 予定総時間 × 100",
+             substituted=(f"{_num(operating)} ÷ {_num(whole)} × 100")
+             if whole > 0 else "直がありません",
+             result=f"{_num(rate, 1)} %",
+             terms=[Term("稼働時間", operating, "分", 0, "計算"),
+                    Term("予定総時間", whole, "分", 0, "計算")],
+             note="日ごとの稼働率の平均ではありません。平均にすると、"
+                  "1直だけ動いた日と3直とも動いた日が同じ重さになります"),
+        Step(key="period_productivity", name="生産性(t/h)",
+             formula="期間合計重量(t) ÷ 稼働時間(h)",
+             substituted=(f"{_num(weight_ton, 2)} ÷ ({_num(operating)} ÷ 60)"
+                          f" = {_num(weight_ton, 2)} ÷ {_num(hours, 2)}")
+             if hours > 0 else "稼働時間が0なので割れません",
+             result=f"{_num(productivity, 2)} t/h",
+             terms=[Term("重量(t)", weight_ton, "t", 2, "計算"),
+                    Term("稼働時間(h)", hours, "h", 2, "計算")]),
+    ]
+
+
+# ======================================================================
 # 出力用
 # ======================================================================
 #: CSVの見出し。**画面と同じ言葉**にする(照らし合わせるため)

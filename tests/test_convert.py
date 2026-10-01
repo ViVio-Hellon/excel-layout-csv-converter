@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import csv
 import logging
 import subprocess
 import sys
@@ -145,6 +146,73 @@ class ConvertTests(unittest.TestCase):
                 found = run.convert([tmp], self.out / str(coil), line="HVC")
                 self.assertTrue(found.files[0].ok)
                 self.assertTrue(found.files[0].verify.ok)
+
+
+class StopNameTests(unittest.TestCase):
+    """停止の「内訳」名 ── **停止内訳CSVがあれば、マスタより先に読みます。**
+
+    移行元(日報管理ツール)が v3.93.0 で変えた仕組みをそのまま使っています
+    (`nippou/logic/stop_csv.py`)。管理者の鍵が要る伝送用ファイルを直さずに、
+    メモ帳で停止理由を足せるようにするためのものです。
+    """
+
+    CSV = ("分類,内訳番号,内訳,備考\r\n"
+           "1,0,休憩食事,\r\n2,タ,材料待ち,\r\n3,G,段取り変更,\r\n")
+
+    def setUp(self) -> None:
+        from converter import user_settings
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        # **後のテストに持ち越さない**(向け先は環境変数と設定ファイル)
+        self.addCleanup(user_settings.apply_to_vendor, user_settings.Settings())
+
+    def convert_with_csv(self, text: str = "") -> list[dict]:
+        from converter import run, user_settings
+
+        folder = self.tmp / "停止"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "停止内訳.csv").write_text(text or self.CSV,
+                                             encoding="utf-8-sig")
+        user_settings.apply_to_vendor(
+            user_settings.Settings(stop_csv=str(folder)))
+
+        books = self.tmp / "books"
+        books.mkdir(parents=True, exist_ok=True)
+        write_xlsx(books / "a.xlsx", day_sheet())
+        out = self.tmp / "out"
+        run.convert([books], out, line="HVC")
+        made = next(out.rglob("停止内訳_*.csv"))
+        with open(made, encoding="utf-8-sig", newline="") as handle:
+            return list(csv.DictReader(handle))
+
+    def test_CSVの内訳名が入る(self) -> None:
+        rows = self.convert_with_csv()
+        names = {row["記号"]: row["内訳"] for row in rows}
+        self.assertEqual(names.get("0"), "休憩食事")
+        self.assertEqual(names.get("タ"), "材料待ち")
+        self.assertEqual(names.get("G"), "段取り変更")
+
+    def test_CSVに無い記号は空のまま通す(self) -> None:
+        """**記号と分類は出ます。** 空になるのは内訳の1列だけです。"""
+        rows = self.convert_with_csv("分類,内訳番号,内訳,備考\r\n1,0,休憩食事,\r\n")
+        names = {row["記号"]: row["内訳"] for row in rows}
+        self.assertEqual(names.get("0"), "休憩食事")
+        self.assertEqual(names.get("タ"), "")
+        self.assertTrue(all(row["分類"] for row in rows))
+
+    def test_読めぐあいを言える(self) -> None:
+        from converter import stop_reasons, user_settings
+
+        folder = self.tmp / "停止"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "停止内訳.csv").write_text(self.CSV, encoding="utf-8-sig")
+        user_settings.apply_to_vendor(
+            user_settings.Settings(stop_csv=str(folder)))
+        ok, text = stop_reasons.notice()
+        self.assertTrue(ok, text)
+        self.assertIn("3記号", text)
 
 
 class VerifyTests(unittest.TestCase):

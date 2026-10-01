@@ -357,6 +357,42 @@ def day_stop_items(repo: NippouRepository, work_date: str, line: str
     return stop_items(day_lot_rows(repo, work_date, line))
 
 
+def period_stop_items(repo: NippouRepository, start: date, end: date,
+                      line: Optional[str] = None
+                      ) -> list[tuple[StopRow, int]]:
+    """**期間ぶんの**記号ごとの停止(長い順)。
+
+        停止累計の円グラフ が出ないですね
+        日集計でしか停止は出せないんですか？ それでは困ります
+
+    出どころは日のものと同じロット行です ── 期間ぶんを読んで、同じ
+    畳み方(`stop_rollup`)をするだけ。**別の数え方を作りません。**
+    """
+    return stop_items(lot_rows(repo, start, end, line))
+
+
+def by_shift(rows: list[ShiftAggregate]) -> list[ShiftAggregate]:
+    """期間ぶんを**直ごとに1行**へ畳む(1直・2直・3直・日勤)。
+
+    日別の表と同じ形なので、画面は同じ部品で描けます ── 「この1か月、
+    どの直がいちばん止まっているか」は、日ごとに見ていては出ません。
+    """
+    totals: dict[str, ShiftAggregate] = {}
+    for row in rows:
+        acc = totals.get(row.shift)
+        if acc is None:
+            acc = ShiftAggregate(report_date="", line=row.line,
+                                 shift=row.shift)
+            totals[row.shift] = acc
+        acc.sheet_count += row.sheet_count
+        acc.weight_kg += row.weight_kg
+        acc.work_minutes += row.work_minutes
+        acc.management_loss_minutes += row.management_loss_minutes
+        acc.unplanned_stop_minutes += row.unplanned_stop_minutes
+        acc.handling_stop_minutes += row.handling_stop_minutes
+    return sorted(totals.values(), key=lambda r: shift_sort_key(r.shift))
+
+
 def by_key(repo: NippouRepository, start: date, end: date,
            line: Optional[str] = None) -> list[KeyTotals]:
     """ロット・用途・納入先ごとの集計。**直をまたいだぶんを1つにします。**

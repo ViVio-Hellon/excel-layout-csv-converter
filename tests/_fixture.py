@@ -29,15 +29,25 @@ _RELS = """<?xml version="1.0"?>
 </Relationships>"""
 
 
-def write_xlsx(path: Path, cells: dict, name: str = "2026年8月26日_HVC") -> Path:
-    """`{"A1": "値"}` から xlsx を作る。"""
+def write_xlsx(path: Path, cells: dict, name: str = "2026年8月26日_HVC",
+               ruby: dict | None = None) -> Path:
+    """`{"A1": "値"}` から xlsx を作る。
+
+    `ruby={"A1": "シュウケイ"}` と渡すと、そのセルに**ふりがな**(`rPh`)を
+    付けます ── 実物のブックには付いていて、読み方を間違えると値が
+    「集計シュウケイ」になります(`converter/cells.py`)。
+    """
+    ruby = ruby or {}
     rows: dict[int, list[str]] = {}
     for ref, text in cells.items():
         _column, number = xlsx_sheet.split_ref(ref)
         safe = (str(text).replace("&", "&amp;").replace("<", "&lt;")
                 .replace(">", "&gt;"))
+        reading = ruby.get(ref, "")
+        extra = (f'<rPh sb="0" eb="{len(str(text))}"><t>{reading}</t></rPh>'
+                 if reading else "")
         rows.setdefault(number, []).append(
-            f'<c r="{ref}" t="inlineStr"><is><t>{safe}</t></is></c>')
+            f'<c r="{ref}" t="inlineStr"><is><t>{safe}</t>{extra}</is></c>')
     body = "".join(f'<row r="{n}">' + "".join(rows[n]) + "</row>"
                    for n in sorted(rows))
     sheet = ('<?xml version="1.0"?><worksheet xmlns="http://schemas.'

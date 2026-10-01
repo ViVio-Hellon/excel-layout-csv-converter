@@ -73,10 +73,12 @@ class Column:
 COLUMNS: tuple[Column, ...] = (
     # 紙とCSVは「ロット№」のまま、**打つ画面だけ LOTNO**。
     # 現場が口にするのも、引き先(`LS4LOT` / `SIKALOT`)の列名も LOTNO
-    # です(`screen_label` の説明)
-    Column("LOT", "ロット№", "", 96, "text", screen_label="LOTNO"),
+    # です(`screen_label` の説明)。
+    # 幅は**中身に合わせる**: LOTNO は最大7桁なので7文字ぎりぎり(余った幅は
+    # 寸法へ回す)。寸法は「20.000×1528.0×13053.0」(丈5桁)まで見切れない幅
+    Column("LOT", "ロット№", "", 68, "text", screen_label="LOTNO"),
     Column("ZAI", "材・調質", "", 76, "text"),
-    Column("SIZ", "厚×幅×丈", "製品寸法", 132, "text"),
+    Column("SIZ", "厚×幅×丈", "製品寸法", 168, "text"),
     Column("KEN", "検入枚数", "", 56, "num"),
     Column("KZ", "開始 時", "梱包作業時間", 44, "num"),
     Column("KH", "開始 分", "梱包作業時間", 44, "num"),

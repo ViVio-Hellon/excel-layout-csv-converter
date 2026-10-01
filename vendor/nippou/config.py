@@ -98,11 +98,52 @@ KEY_ADMIN_PASSWORD = "admin_password"    # 撹拌済み(`admin_password.py`)
 #   目標\\今期.csv             … アプリのフォルダからの相対
 #   \\\\server\\共有\\目標.csv   … そのまま
 KEY_LINE_TARGET_FILE = "line_target_file"
+# 停止内訳のCSV。書き方はライン毎目標と同じ(名前でも、フォルダ付きでも、
+# フルパスでもよい)。**あれば伝送用ファイルの表より先に読む**
+# (分類ごと。`logic/stop_csv`)── 停止理由を足すのに管理者パスワードを
+# 要らなくするため
+KEY_STOP_REASON_FILE = "stop_reason_file"
+# VC計算マスタの置き場所(フォルダ)。**空なら参照用マスタと同じフォルダ。**
+# vc-calculator と1つのマスタを使うとき、あちらのフォルダを指せるように
+# (`SETTINGS.vc_master_path` ── 名前の優先は `VC計算マスタ` → `vc_master`)
+KEY_VC_MASTER_DIR = "vc_master_dir"
+
+# **この端末のライン**と丸徳の設備番号。据え付けのときに設定画面で決める。
+#
+# 以前は覚えていませんでした(プロセスの中だけ)。アプリは画面を閉じると
+# 90秒で自分から終わる(`idle_exit`)ので、**起動し直すたびに L1 に
+# 戻って**いました ── LVC の端末で打った日報が L1 のキーで保存され、
+# 共有の `T_日報ヘッダー_L1` へ送られます。VBA はレジストリに持っていた
+# (`SaveSetting "日報管理", "Config", "Line"`)ものです。
+#
+# **端末ごとの値**なので、配布設定(`distribution`)には既定で入れません
+# (選べば入れられる ── python-web-tools の「拠点」と同じ)。
+KEY_TERMINAL_LINE = "terminal_line"
+KEY_TERMINAL_MARU = "terminal_maru_sub"
 
 # CSV と印刷用HTMLの書き出し先。**どこに出たのか分からない**という
 # 声があったので、設定できるようにした(既定はローカル領域の `work`)。
 # 共有のフォルダを指せば、出したCSVを他の人がそのまま開ける
 KEY_REPORT_OUT_DIR = "report_output_dir"
+
+# 集計CSVの**2つ目の**出力先。空なら出さない(1つ目だけ)。
+#
+#     集計データの出力先を２つ設定したいです(使用、アクセス権の関係)
+#
+# 見る人とアクセス権で分けたいときのためです(例: 1つ目は現場の共有、
+# 2つ目は管理の人だけが入れるフォルダ)。**中身は1つ目と同じ4本**を、
+# 同じ `ライン名/集計/年月/日` の形で出します。印刷用HTMLと月別の
+# 書き出しは1つ目(と月別の出力パス)だけです ── 集計のデータではないので
+KEY_REPORT_OUT_DIR2 = "report_output_dir_2"
+
+# 標準作業時間のCSV(標準の表・同条件の作業)の出力先。
+#
+#     標準作業時間： CSVに出す 出力先を指定できるようにしてください
+#
+# **空なら集計CSVと同じ先**(`KEY_REPORT_OUT_DIR`)。集計CSVは現場の共有へ
+# 出すことが多い一方、標準作業時間は見る人(班長・管理)が違うので、
+# 別のフォルダを指せるようにしてあります
+KEY_STANDARD_TIME_OUT_DIR = "standard_time_output_dir"
 
 
 # 音声ファイルの名前。鍵ごとに1つ(`logic/sound.SOUND_KEYS`)。
@@ -113,8 +154,10 @@ def sound_file_key(sound_key: str) -> str:
 
 # 設定画面から変えられる参照パス。**表示名はここが唯一の出どころ**
 PATH_KEYS = (KEY_ACCESS_DIR, KEY_REFERENCE_DIR, KEY_SOUND_DIR,
-             KEY_MONTHLY_DIR, KEY_REPORT_OUT_DIR,
-             KEY_ACCESS_DB_FILE, KEY_LINE_TARGET_FILE)
+             KEY_MONTHLY_DIR, KEY_REPORT_OUT_DIR, KEY_REPORT_OUT_DIR2,
+             KEY_STANDARD_TIME_OUT_DIR,
+             KEY_ACCESS_DB_FILE, KEY_LINE_TARGET_FILE, KEY_STOP_REASON_FILE,
+             KEY_VC_MASTER_DIR)
 
 
 def resolve_dir(text: str) -> Path:
@@ -198,6 +241,9 @@ class Settings:
     # (`T_日報ヘッダー_<ライン>` / `T_日報明細_<ライン>` が入っている)。
     # 旧名「日報管理」しか無いフォルダでも読めます(`OLDER_NAMES`)
     access_db_filename: str = "日報データ.sqlite3"
+    #: 標準作業時間の蓄積先。**共有(日報データと同じフォルダ)に1つ**。
+    #: 全ライン・全端末が同じファイルへ書く(`services/standard_time`)
+    standard_time_filename: str = "標準作業時間.sqlite3"
 
     # Header/detail table name templates. ``{line}`` is replaced with a
     # sanitized line name, matching NippouDB_HeaderTable / _DetailTable.
@@ -295,6 +341,10 @@ class Settings:
     # これが読めないと VC も単重も合紙も出ない
     gw_hiki_master_filename: str = "SIKAHIKI.sqlite3"
     gw_material_master_filename: str = "梱包資材マスタ.sqlite3"
+    # VC長さ計算のマスタ(品種・VC厚・内径・定尺・早見表)。**無ければ初期値で
+    # 作ります**(`nippou/vc/masters.py`)。vc-calculator の `vc_master.sqlite3`
+    # を同じフォルダに置けば、そのまま読みます(`OLDER_NAMES`)
+    vc_master_filename: str = "VC計算マスタ.sqlite3"
     gw_material_master_table: str = "資材重量"
     gw_vc_master_table: str = "VC重量"
     staff_master_table: str = "班員名簿"
@@ -336,6 +386,9 @@ class Settings:
     stop_reason_tables: tuple[str, ...] = (
         "作業停止時間内訳_1", "作業停止時間内訳_2", "作業停止時間内訳_3")
     shift_time_table: str = "時間用"
+    #: 停止内訳のCSV。**あれば上の3つの表より先に読む**(分類ごと)。
+    #: 置き場所は設定画面の「停止内訳の置き場所」(既定: 参照用マスタと同じ)
+    stop_reason_csv_filename: str = "停止内訳.csv"
 
     # ------------------------------------------------------------------
     # 参照パス。**読むたびに設定を見に行く**
@@ -448,6 +501,11 @@ class Settings:
         return _pick_source(self.access_dir, self.access_db_name)
 
     @property
+    def standard_time_db_path(self) -> Path:
+        """標準作業時間.sqlite3(共有の日報データと同じフォルダ)。"""
+        return self.access_dir / self.standard_time_filename
+
+    @property
     def gw_lot_master_path(self) -> Path:
         return self._reference(self.gw_lot_master_filename)
 
@@ -462,6 +520,24 @@ class Settings:
     @property
     def gw_material_master_path(self) -> Path:
         return self._reference(self.gw_material_master_filename)
+
+    @property
+    def vc_master_dir(self) -> Path:
+        """VC計算マスタのフォルダ。**空なら参照用マスタと同じ**(設定画面で変えられる)。"""
+        return _configured_dir(KEY_VC_MASTER_DIR, self.gw_reference_dir)
+
+    @property
+    def vc_master_path(self) -> Path:
+        """VC長さ計算のマスタ。**名前の優先は `VC計算マスタ` → `vc_master`**
+        (`OLDER_NAMES`)。どちらも無ければ `VC計算マスタ.sqlite3`(初めて
+        使うときに作る)。"""
+        return _pick_source(self.vc_master_dir, self.vc_master_filename)
+
+    def vc_master_candidates(self) -> list[Path]:
+        """VC計算マスタとして探す名前を、**優先の順に**(画面で関係を見せるため)。"""
+        stem = Path(self.vc_master_filename).stem
+        return [self.vc_master_dir / f"{name}.sqlite3"
+                for name in (stem, *OLDER_NAMES.get(stem, ()))]
 
     @property
     def gw_coil_master_path(self) -> Path:
@@ -483,12 +559,25 @@ class Settings:
         変えたい」ときに2か所を見ることになり、共有の別フォルダに置く
         ような使い方もできなくなります。
         """
+        return self._configured_file(KEY_LINE_TARGET_FILE,
+                                     self.line_target_filename)
+
+    @property
+    def stop_reason_csv_path(self) -> Path:
+        """停止内訳のCSV。**書き方と既定はライン毎目標と同じ**
+        (`line_target_path`)── 空なら参照用マスタの置き場所の `停止内訳.csv`。
+        """
+        return self._configured_file(KEY_STOP_REASON_FILE,
+                                     self.stop_reason_csv_filename)
+
+    def _configured_file(self, key: str, default_name: str) -> Path:
+        """設定画面で置き場所ごと変えられる、読むだけのファイル。"""
         from . import user_settings
 
-        configured = user_settings.get(KEY_LINE_TARGET_FILE)
+        configured = user_settings.get(key)
         text = configured.strip() if isinstance(configured, str) else ""
         if not text:
-            return self.gw_reference_dir / self.line_target_filename
+            return self.gw_reference_dir / default_name
         given = Path(text).expanduser()
         if given.is_absolute():
             return given
@@ -528,6 +617,37 @@ class Settings:
         override = _app_dir_override()
         return override / "reports" if override else app_config.local_dir("work")
 
+    @property
+    def report_output_dir_2(self) -> Optional[Path]:
+        """集計CSVの2つ目の出力先。**決めていなければ None**(出さない)。"""
+        from . import user_settings
+
+        configured = user_settings.get(KEY_REPORT_OUT_DIR2)
+        text = configured.strip() if isinstance(configured, str) else ""
+        return resolve_dir(text) if text else None
+
+    @property
+    def standard_time_output_dir(self) -> Path:
+        """標準作業時間のCSVの置き場所。**決めていなければ集計CSVと同じ先。**"""
+        from . import user_settings
+
+        configured = user_settings.get(KEY_STANDARD_TIME_OUT_DIR)
+        text = configured.strip() if isinstance(configured, str) else ""
+        return resolve_dir(text) if text else self.report_output_dir
+
+    @property
+    def summary_csv_dirs(self) -> list[Path]:
+        """集計CSVを出す先ぜんぶ。**1つ目が先頭**(2つ目は決めてあるときだけ)。
+
+        2つ目が1つ目と同じ道なら1つにまとめます ── 同じ所へ2回書いて、
+        知らせに同じ道が2行並ぶだけになるので。
+        """
+        dirs = [self.report_output_dir]
+        second = self.report_output_dir_2
+        if second is not None and second != dirs[0]:
+            dirs.append(second)
+        return dirs
+
 
 # ----------------------------------------------------------------------
 # 参照DBの旧名。**名前が変わる日を跨ぐための橋。**
@@ -547,6 +667,9 @@ OLDER_NAMES: dict[str, tuple[str, ...]] = {
     # 旧名のファイルがあればそちらへ書き続ける(新名で作り直すと、
     # これまでのぶんが入っていない空のファイルができる)
     "日報データ": ("日報管理",),
+    # VC長さ計算のマスタ。vc-calculator(単独のツール)が作った `vc_master`
+    # があればそれを使う ── 表の形は同じで、2つのツールで1つを共有できる
+    "VC計算マスタ": ("vc_master",),
 }
 
 

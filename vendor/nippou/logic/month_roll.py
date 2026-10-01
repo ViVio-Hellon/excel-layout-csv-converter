@@ -15,6 +15,18 @@
 【このツールでの見方】
 シートの代わりに、手元のDBに入っている報告日の (年, 月) を見ます
 (`repository.month_keys`)。判断の中身は VBA のままです。
+
+【書き出した月を覚える】(v3.80.0)
+VBA は書き出したあとにその月のシートを消していたので、書き出した月は
+次の判定に二度と上がりませんでした。このツールは**手元の日報を消さない**
+ので、覚えておかないといちばん古い月が候補に残り続けます:
+
+    9月の共有へ保存のたびに 8月をまた書き出す
+    10月になっても 8月を書き出し、**9月はいつまでも書き出されない**
+
+そこで、書き出しを済ませた月(`settled`)を候補から外します。候補は
+**今月より前の、まだ済んでいない月**で、いちばん古いものから片付けます。
+今月は候補にしません(VBA の「いちばん新しい月 = 今月 → まだ月の途中」)。
 """
 from __future__ import annotations
 
@@ -45,31 +57,37 @@ class RollDecision:
                 "label": self.label, "reason": self.reason}
 
 
-def decide(months: Iterable[tuple[int, int]], today: date) -> RollDecision:
+def decide(months: Iterable[tuple[int, int]], today: date,
+           settled: Iterable[tuple[int, int]] = ()) -> RollDecision:
     """port of ``月替わりチェック実行``。
 
     `months` は入っている報告日の (年, 月)。順不同でも構いません。
+    `settled` は書き出しを済ませた月(そのあと直していないもの)。
     """
     found: Sequence[tuple[int, int]] = sorted(set(months))
     if not found:
         return RollDecision(reason="データがありません")
 
-    oldest, newest = found[0], found[-1]
     now = (today.year, today.month)
-
-    if len(found) > 1:
+    done = set(settled)
+    # **今月より前の、まだ済んでいない月。** 今月は月の途中なので片付けない
+    # (未来の日付は打ち間違いなので、これも片付けない)
+    waiting = [m for m in found if m < now and m not in done]
+    if waiting:
+        oldest = waiting[0]
+        more = f"(ほかに{len(waiting) - 1}か月)" if len(waiting) > 1 else ""
         return RollDecision(
             True, *oldest,
-            reason=f"{len(found)}か月ぶんが混ざっています。"
-                   f"古いほうの{oldest[0]}年{oldest[1]}月を片付けます")
-    if newest != now:
-        return RollDecision(
-            True, *newest,
-            reason=f"入っているのは{newest[0]}年{newest[1]}月ぶんだけで、"
+            reason=f"{oldest[0]}年{oldest[1]}月をまだ書き出していません{more}。"
                    f"今は{now[0]}年{now[1]}月です")
-    return RollDecision(
-        False, *newest,
-        reason=f"{newest[0]}年{newest[1]}月の途中です")
+
+    past = [m for m in found if m < now]
+    shown = now if now in found else found[-1]
+    reason = (f"{now[0]}年{now[1]}月の途中です" if now in found
+              else f"入っているのは{shown[0]}年{shown[1]}月までです")
+    if past:
+        reason += f"({past[-1][0]}年{past[-1][1]}月までは書き出し済み)"
+    return RollDecision(False, *shown, reason=reason)
 
 
 def month_folder_name(year: int, month: int) -> str:

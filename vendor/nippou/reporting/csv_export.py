@@ -708,6 +708,56 @@ def write_daily_set(repo: NippouRepository, report_date: str, line: str,
 
 
 @dataclass(frozen=True)
+class Copy:
+    """集計CSVの**2つ目の出力先**へ書いた結果(`config.SETTINGS.summary_csv_dirs`)。"""
+
+    base: Path
+    #: 書けたときの、開くと中身が見えるところ(日のフォルダ等)
+    where: str = ""
+    #: 書けなかった理由。空なら書けた
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.error
+
+    def as_dict(self) -> dict[str, object]:
+        return {"dir": str(self.base), "where": self.where,
+                "ok": self.ok, "error": self.error}
+
+    def text(self) -> str:
+        """知らせに足す1句。"""
+        if self.ok:
+            return f"2つ目の出力先にも出しました({self.where or self.base})"
+        return f"2つ目の出力先({self.base})には出せませんでした: {self.error}"
+
+
+def write_copies(bases: list[Path], write) -> list[Copy]:
+    """1つ目より後ろの出力先へ、**同じものを**書く。
+
+        集計データの出力先を２つ設定したいです(使用、アクセス権の関係)
+
+    `write(base)` は1つ目に書いたのと同じ書き方(戻り値の `str()` が
+    知らせに出る場所)。**1つ落ちても1つ目は成功のまま** ── 2つ目は
+    アクセス権の違うフォルダを指すことが前提なので、届かない日は普通に
+    あります。そのときは落ちたことを知らせに載せて、黙りません。
+    """
+    from ..logging_setup import get_logger
+
+    log = get_logger("reporting.csv_export")
+    out: list[Copy] = []
+    for base in bases:
+        try:
+            where = write(base)
+        except Exception as exc:                  # noqa: BLE001 - 1つ目は書けている
+            log.exception("集計CSVを2つ目の出力先へ書けませんでした: %s", base)
+            out.append(Copy(base=base, error=str(exc)))
+            continue
+        out.append(Copy(base=base, where=str(where) if where is not None else ""))
+    return out
+
+
+@dataclass(frozen=True)
 class PeriodSet:
     """期間ぶんの書き出し。**日ごとに1組**。"""
 
@@ -787,10 +837,32 @@ def write_table(table, out_path: Path) -> int:
     return len(table.rows)
 
 
+def standard_time_output_path(base_dir: Path, today, line: str) -> Path:
+    """例: ``標準作業時間_2026-09-26_L1.csv``(期間ではなく、その時点の標準)。"""
+    safe_line = "".join(ch for ch in line
+                        if ch not in _UNSAFE_FILENAME_CHARS).strip() or "Unknown"
+    return base_dir / f"標準作業時間_{today}_{safe_line}.csv"
+
+
+def works_output_path(base_dir: Path, today, line: str, criteria) -> Path:
+    """例: ``同条件作業_2026-09-26_L1_H176_1P0001_8×1528×3053.csv``
+
+    OR のときは欄のあいだを「又は」でつなぎます(AND と同じ名前にしない)。
+    ファイル名が長くなりすぎないよう、条件の部分は 80 文字で切ります。
+    """
+    word = "_" if criteria.join == "and" else "_又は_"
+    parts = [("・".join(values)) for _, _, values in criteria.fields]
+    cond = word.join(parts)
+    safe = "".join(ch for ch in cond if ch not in _UNSAFE_FILENAME_CHARS).strip()[:80] or "-"
+    safe_line = "".join(ch for ch in (line or "全ライン")
+                        if ch not in _UNSAFE_FILENAME_CHARS).strip() or "-"
+    return base_dir / f"同条件作業_{today}_{safe_line}_{safe}.csv"
+
+
 def agg_output_path(base_dir: Path, key: str, start, end, line: str) -> Path:
     """例: ``集計_ロット別_2026-08-01_2026-08-31_L1.csv``"""
     names = {"days": "日別", "shifts": "直別", "by_key": "ロット別",
-             "lots": "ロット一覧"}
+             "lots": "ロット一覧", "push_log": "共有保存の履歴"}
     safe_line = "".join(ch for ch in line
                         if ch not in _UNSAFE_FILENAME_CHARS).strip() or "Unknown"
     return base_dir / (f"集計_{names.get(key, key)}_{start}_{end}"

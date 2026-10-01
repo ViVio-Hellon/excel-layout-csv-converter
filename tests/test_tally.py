@@ -104,6 +104,20 @@ class 対象シート(Base):
         self.assertEqual(found.rows, [])
         self.assertIn("対象外", found.sheets[0].skipped)
 
+    def test_ふりがな付きのA1でも拾う(self) -> None:
+        """実物の2025年のブックは `A1` に**ふりがな**が付いていました。
+
+        Excel の `.Value` はふりがなを返さないので、VBA が見ているのは
+        「集計」です。読み手がふりがなまで拾うと「集計シュウケイ」になり、
+        **そのブックは1枚も拾われません**(`converter/cells.py`)。
+        """
+        path = self.tmp / "ruby.xlsx"
+        write_xlsx(path, tally_sheet({8: {"D": "L1", "L": "9"}}),
+                   name=NAME, ruby={"A1": "シュウケイ"})
+        found = tally.build([path])
+        self.assertEqual(len(found.rows), 1, found.sheets[0].skipped)
+        self.assertEqual(found.rows[0][tally.LOT], "L1")
+
     def test_名前に機側が無ければ拾わない(self) -> None:
         path = self.book({8: {"D": "L1", "L": "9"}}, name="2026年8月23日_HVC")
         found = tally.build([path])
@@ -268,6 +282,175 @@ class CSVを読む(Base):
         found = tally.build([self.csv(text)])
         self.assertEqual(found.rows, [])
         self.assertIn("列が多すぎます", found.sheets[0].skipped)
+
+
+class 変換が出したCSVを読む(Base):
+    """変換すると1日に4本出ます(集計 / 集計明細 / 停止内訳 / 計算内容)。
+
+    現場は**日付フォルダごと**ドラッグするので、4本とも入ってきます。
+    行の材料になるのは集計明細だけ、停止内訳は**記号→内訳名**として使い、
+    残りは理由を言って飛ばします ── 黙って混ぜたり、黙って捨てたりしない。
+    """
+
+    def labels(self) -> dict:
+        found = dict(tally.detail_labels())
+        found.setdefault("B", "係数処理ﾛｯﾄ数")     # 鍵のすぐ後ろに別立てで入る
+        return found
+
+    def detail_row(self, page: str = "1", row_no: str = "1",
+                   date: str = "2026年8月23日", shift: str = "1直",
+                   **columns) -> dict:
+        """シートの列(`D` `L` `AJ` …)で書ける、集計明細CSVの1行。"""
+        labels = self.labels()
+        made = {"日付": date, "ライン": "LS", "直": shift,
+                "ページ": page, "行": row_no}
+        for column, value in columns.items():
+            made[labels[column]] = value
+        return made
+
+    def detail_csv(self, rows: list, *,
+                   name: str = "集計明細_2026-08-23_LS.csv") -> Path:
+        from nippou.reporting import csv_export
+        return self._write(name, list(csv_export.DETAIL_FIELDNAMES), rows)
+
+    def stops_csv(self, rows: list, *,
+                  name: str = "停止内訳_2026-08-23_LS.csv") -> Path:
+        from nippou.reporting import csv_export
+        return self._write(name, list(csv_export.STOP_FIELDNAMES), rows)
+
+    def day_csv(self, name: str = "集計_2026-08-23_LS.csv") -> Path:
+        from nippou.reporting import csv_export
+        return self._write(name, list(csv_export.FIELDNAMES),
+                           [{"日付": "2026年8月23日", "ライン": "LS",
+                             "直": "1直"}])
+
+    def formula_csv(self, name: str = "計算内容_2026-08-23_LS.csv") -> Path:
+        from nippou.logic import formula
+        return self._write(name, list(formula.CSV_FIELDNAMES), [{}])
+
+    def _write(self, name: str, fields: list, rows: list) -> Path:
+        path = self.tmp / name
+        with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: v for k, v in row.items() if k in fields})
+        return path
+
+    # -- 行の材料 ----------------------------------------------------
+    def test_集計明細のCSVから拾う(self) -> None:
+        found = tally.build([self.detail_csv(
+            [self.detail_row(D="L1", L="9", AC="35", P="12", N="2")])])
+        self.assertEqual(len(found.rows), 1, found.sheets[0].skipped)
+        row = found.rows[0]
+        self.assertEqual(row[0], "2026年8月23日")
+        self.assertEqual(row[tally.LOT], "L1")
+        self.assertEqual(row[list(tally.HEADERS).index("作業時間（分）")], "35")
+        self.assertEqual(row[list(tally.HEADERS).index("梱包数")], "12")
+        self.assertEqual(found.sheets[0].kind, "CSV(集計明細)")
+
+    def test_終了時刻も停止もない行は拾わない(self) -> None:
+        """**VBAと同じ条件**です(シートから読むときと揃えます)。"""
+        found = tally.build([self.detail_csv([
+            self.detail_row(D="L1", L="9"),
+            self.detail_row(row_no="2", D="L2"),          # 空の行
+        ])])
+        self.assertEqual([r[tally.LOT] for r in found.rows], ["L1"])
+
+    def test_日付は行ごとに採る(self) -> None:
+        """CSV1本に何日ぶんも入り得ます(シートは1枚=1日)。"""
+        found = tally.build([self.detail_csv([
+            self.detail_row(D="L1", L="9"),
+            self.detail_row(date="2026年8月24日", D="L2", L="9"),
+        ])])
+        self.assertEqual(found.dates, ["2026年8月23日", "2026年8月24日"])
+
+    # -- 停止の内訳名 ------------------------------------------------
+    def test_停止は内訳名が引ければ名前で入る(self) -> None:
+        """集計明細にあるのは**記号**だけです。名前は停止内訳CSVから。"""
+        detail = self.detail_csv([self.detail_row(D="L1", L="9",
+                                                 AJ="タ", AK="30")])
+        stops = self.stops_csv([{
+            "日付": "2026年8月23日", "ライン": "LS", "直": "1直",
+            "区分": "1件ずつ", "分類": "段取り・突発停止", "記号": "タ",
+            "内訳": "材料待ち", "ページ": "1", "行": "1",
+            "停止の位置": "作業停止①", "回数": "1", "停止時間(分)": "30"}])
+        found = tally.build([detail, stops])
+        row = found.rows[0]
+        self.assertEqual(row[list(tally.HEADERS).index("作業停止内訳-1")],
+                         "材料待ち")
+        self.assertEqual(row[list(tally.HEADERS).index("時間（分）")], "30")
+
+    def test_順番を変えても内訳名は引ける(self) -> None:
+        """**ドラッグの順に左右されません**(先にCSVをのぞきます)。"""
+        detail = self.detail_csv([self.detail_row(D="L1", L="9",
+                                                 AJ="タ", AK="30")])
+        stops = self.stops_csv([{
+            "日付": "2026年8月23日", "ライン": "LS", "直": "1直",
+            "区分": "1件ずつ", "記号": "タ", "内訳": "材料待ち",
+            "ページ": "1", "行": "1", "停止の位置": "作業停止①"}])
+        for order in ([detail, stops], [stops, detail]):
+            with self.subTest(order=[p.name for p in order]):
+                found = tally.build(order)
+                self.assertEqual(
+                    found.rows[0][list(tally.HEADERS).index("作業停止内訳-1")],
+                    "材料待ち")
+
+    def test_引けない記号は記号のまま言う(self) -> None:
+        """**黙って空にしません。** 何が引けなかったかまで出します。"""
+        found = tally.build([self.detail_csv(
+            [self.detail_row(D="L1", L="9", AJ="タ", AK="30")])])
+        self.assertEqual(
+            found.rows[0][list(tally.HEADERS).index("作業停止内訳-1")], "タ")
+        self.assertIn("記号のまま", found.summary())
+        self.assertIn("タ", found.summary())
+
+    def test_停止内訳CSVだけでは行が出ない(self) -> None:
+        stops = self.stops_csv([{
+            "日付": "2026年8月23日", "ライン": "LS", "直": "1直",
+            "区分": "1件ずつ", "記号": "タ", "内訳": "材料待ち",
+            "ページ": "1", "行": "1", "停止の位置": "作業停止①"}])
+        found = tally.build([stops])
+        self.assertEqual(found.rows, [])
+        self.assertEqual(found.sheets[0].kind, "CSV(停止内訳)")
+        self.assertIn("内訳名", found.sheets[0].note)
+
+    # -- 材料にならないCSV -------------------------------------------
+    def test_日ごとの集計CSVは理由を言って飛ばす(self) -> None:
+        found = tally.build([self.day_csv()])
+        self.assertEqual(found.rows, [])
+        self.assertIn("集計明細", found.sheets[0].skipped)
+
+    def test_計算内容CSVも理由を言って飛ばす(self) -> None:
+        found = tally.build([self.formula_csv()])
+        self.assertEqual(found.rows, [])
+        self.assertIn("集計明細", found.sheets[0].skipped)
+
+    def test_日付フォルダごと入れても集計できる(self) -> None:
+        """4本まとめて渡しても、材料は集計明細だけを使います。"""
+        detail = self.detail_csv([self.detail_row(D="L1", L="9",
+                                                 AJ="タ", AK="30")])
+        stops = self.stops_csv([{
+            "日付": "2026年8月23日", "ライン": "LS", "直": "1直",
+            "区分": "1件ずつ", "記号": "タ", "内訳": "材料待ち",
+            "ページ": "1", "行": "1", "停止の位置": "作業停止①"}])
+        found = tally.build(sorted([detail, stops, self.day_csv(),
+                                    self.formula_csv()]))
+        self.assertEqual(len(found.rows), 1)
+        self.assertEqual(
+            found.rows[0][list(tally.HEADERS).index("作業停止内訳-1")],
+            "材料待ち")
+
+    def test_種類を見分けられる(self) -> None:
+        from nippou.logic import formula
+        from nippou.reporting import csv_export
+        for fields, name in ((csv_export.DETAIL_FIELDNAMES, tally.DETAIL_CSV),
+                             (csv_export.STOP_FIELDNAMES, tally.STOPS_CSV),
+                             (csv_export.FIELDNAMES, tally.DAY_CSV),
+                             (formula.CSV_FIELDNAMES, tally.FORMULA_CSV)):
+            with self.subTest(name=name):
+                self.assertEqual(tally.csv_kind(list(fields)), name)
+        self.assertEqual(tally.csv_kind(["あ", "い"]), "")
 
 
 class 書き出し(Base):

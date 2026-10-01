@@ -25,10 +25,13 @@
 
     <div class="fields">
       <label class="field">
-        <span class="label">入力フォルダ</span>
+        <span class="label">入力フォルダ<em>任意</em></span>
         <input type="text" id="input_dir" spellcheck="false"
                placeholder="例: \\サーバ\共有\日報\2026.08">
         <span class="hint" id="hint-input_dir"></span>
+        <span class="hint">ドラッグで入れるなら<b>空のままで構いません</b>。
+          共有に溜まったブックをドラッグせずに読むとき、変換タブで
+          「入力フォルダをそのまま読む」を選ぶと、ここを読みます。</span>
       </label>
 
       <label class="field">
@@ -49,12 +52,26 @@
       </label>
 
       <label class="field">
-        <span class="label">参照用マスタの置き場所</span>
+        <span class="label">参照用マスタの置き場所<em>任意</em></span>
         <input type="text" id="ref_dir" spellcheck="false"
                placeholder="伝送用ファイル.sqlite3 が入っているフォルダ">
         <span class="hint" id="hint-ref_dir"></span>
+        <span class="hint">停止の「内訳」名(休憩食事 など)の出どころです。
+          読めなくても変換は止まりません ── 空になるのは内訳の1列だけです。</span>
+      </label>
+
+      <label class="field">
+        <span class="label">停止内訳CSVの置き場所<em>任意</em></span>
+        <input type="text" id="stop_csv" spellcheck="false"
+               placeholder="フォルダでも、停止内訳.csv そのものでも">
+        <span class="hint" id="hint-stop_csv"></span>
+        <span class="hint">メモ帳で直せる一覧です。<b>分類ごとに、ここに行が
+          あればマスタより先に読みます</b>。空なら参照用マスタの置き場所の
+          <code>停止内訳.csv</code> を見ます。</span>
       </label>
     </div>
+
+    <div class="notice" id="stop-reasons"></div>
 
     <div class="row">
       <button class="primary" id="save">設定を保存</button>
@@ -156,9 +173,13 @@
       <div class="chips" id="tally-intake-list"></div>
 
       <div class="notice" id="tally-kinds">
-        受けるCSVは2通りです。<b>前に出した集計</b>(1行目がその見出し)は
-        そのまま積み増し、<b>シートをCSVで保存したもの</b>(A1が「集計」)は
-        ブックと同じに読みます。どちらでもないCSVは、理由を出して飛ばします。
+        <b>日報のブック</b>のほかに、CSVは4通り受けます。
+        <b>変換が出した集計明細</b>(年月／日付フォルダの中にあります)は
+        1行=1行で読み、同じフォルダの<b>停止内訳</b>から停止の記号を
+        内訳名に直します。<b>前に出した機側データ集計</b>はそのまま積み増し、
+        <b>シートをCSVで保存したもの</b>(A1が「集計」)はブックと同じに読みます。
+        <b>日付フォルダをそのまま放り込めます</b> ── 集計・計算内容のCSVは
+        材料にならないので、理由を出して飛ばします。
       </div>
     </section>
 

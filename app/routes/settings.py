@@ -1,4 +1,4 @@
-"""設定部 ── 入力元・出力先・ライン・参照用マスタ
+"""設定部 ── 入力元・出力先・ライン・参照用マスタ・停止内訳CSV
 
 値の持ち方と確かめ方は `converter.user_settings` にあります。ここは
 受けて渡すだけです。
@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 
-from converter import app_config, jobs, user_settings
+from converter import app_config, jobs, stop_reasons, user_settings
 from converter.logging_utils import get_logger, log_paths
 
 from . import Blueprint, Request, Response, json_response, refuse
@@ -26,8 +26,20 @@ def _payload(settings: user_settings.Settings, message: str = "") -> Response:
         "paths": user_settings.describe_paths(settings),
         "message": message,
         "problems": user_settings.problems(settings, need_input=False),
+        # **停止内訳がどこから読めたか**も返します ── 出どころが2つ
+        # (CSVとマスタ)あるので、言わないと「内訳が空」の理由が分からない
+        "stop_reasons": _stop_reasons(),
         "logs": log_paths(),
     })
+
+
+def _stop_reasons() -> dict:
+    """停止内訳の読めぐあい。**読めなくても画面は出します。**"""
+    try:
+        return stop_reasons.read().as_dict()
+    except Exception as exc:                       # noqa: BLE001 - 画面は出す
+        log.warning("停止内訳を見られませんでした: %s", exc)
+        return {}
 
 
 @bp.get("/api/settings")

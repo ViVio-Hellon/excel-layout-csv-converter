@@ -1,4 +1,4 @@
-r"""設定部 ── 入力元・出力先・ライン・参照用マスタ
+r"""設定部 ── 入力元・出力先・ライン・参照用マスタ・停止内訳CSV
 
 【`app_config.py` との違い】
 - `app_config`     … 配るときに決まる値(アプリID・ポート・上限・ローカル領域)
@@ -25,14 +25,19 @@ from pathlib import Path
 from . import app_config
 
 #: 画面から変えられる項目。**表示名の出どころもここ1つ**
-FIELDS = ("input_dir", "output_dir", "line", "ref_dir")
+FIELDS = ("input_dir", "output_dir", "line", "ref_dir", "stop_csv")
 
 LABELS = {
     "input_dir": "入力フォルダ",
     "output_dir": "出力先フォルダ",
     "line": "ライン",
     "ref_dir": "参照用マスタの置き場所",
+    "stop_csv": "停止内訳CSVの置き場所",
 }
+
+#: 停止内訳CSVの名前。**フォルダを指されたときに探す相手**
+#: (移行元の既定と同じ名前 ── `nippou.config` の `stop_reason_csv_filename`)
+STOP_CSV_NAME = "停止内訳.csv"
 
 _lock = threading.Lock()
 
@@ -47,6 +52,9 @@ class Settings:
     output_dir: str = ""
     line: str = ""
     ref_dir: str = ""
+    #: 停止内訳CSV。**フォルダでも、ファイルそのものでも受けます**
+    #: (空なら参照用マスタの置き場所の `停止内訳.csv`)
+    stop_csv: str = ""
 
     def as_dict(self) -> dict[str, str]:
         return {k: str(v or "") for k, v in asdict(self).items()}
@@ -107,6 +115,25 @@ def save(values: dict) -> Settings:
 # ------------------------------------------------------------------
 # 使う前の確かめ ── 「出たはずなのに見当たらない」を作らない
 # ------------------------------------------------------------------
+def stop_csv_path(settings: Settings) -> Path | None:
+    """停止内訳CSVの道。**フォルダを指されたらその中の `停止内訳.csv`。**
+
+    空なら `None` ── 写してある日報管理ツール側の既定(参照用マスタの
+    置き場所にある `停止内訳.csv`)にまかせます。
+    """
+    if not settings.stop_csv:
+        return None
+    try:
+        path = resolve(settings.stop_csv)
+    except ValueError:
+        return None
+    # **まだ無いファイルも受けます**(これから置く場合)。拡張子が無ければ
+    # フォルダとみなして、その中の既定の名前を指します
+    if path.is_dir() or not path.suffix:
+        return path / STOP_CSV_NAME
+    return path
+
+
 def describe_paths(settings: Settings) -> list[dict]:
     """1項目ずつ、**どこを指していて、そこはあるのか**を返す。"""
     found: list[dict] = []
@@ -125,6 +152,22 @@ def describe_paths(settings: Settings) -> list[dict]:
             except ValueError as exc:
                 item["note"] = str(exc)
         found.append(item)
+
+    # 停止内訳CSVは**フォルダではなくファイル**を指します(フォルダを
+    # 指されたら中の `停止内訳.csv`)。あるかどうかもファイルで見ます
+    item = {"key": "stop_csv", "label": LABELS["stop_csv"],
+            "text": settings.stop_csv, "resolved": "", "exists": False,
+            "note": ""}
+    if settings.stop_csv:
+        path = stop_csv_path(settings)
+        if path is None:
+            item["note"] = "書き方が読めません"
+        else:
+            item["resolved"] = str(path)
+            item["exists"] = path.is_file()
+            if not item["exists"]:
+                item["note"] = "まだありません(参照用マスタの表を読みます)"
+    found.append(item)
     return found
 
 
@@ -179,3 +222,36 @@ def apply_to_vendor(settings: Settings) -> None:
             os.environ.pop("NIPPOU_GW_REF_DIR", None)
     else:
         os.environ.pop("NIPPOU_GW_REF_DIR", None)
+    _apply_stop_csv(settings)
+
+
+def _apply_stop_csv(settings: Settings) -> None:
+    """停止内訳CSVの置き場所を `nippou` 側へ渡す。
+
+    向こうは**この端末の設定ファイル**から読みます(`user_settings.get`
+    の `stop_reason_file`)。置き場所は上で `NIPPOU_APP_DIR` をこちらの
+    領域へ向けてあるので、書くのはこのアプリの持ちものです ── 同じ端末に
+    日報管理ツールが入っていても、あちらの設定には触りません。
+
+    **空にしたら消します。** 残しておくと「設定を空にしたのに前の場所を
+    読み続ける」になります(向こうは空文字を「既定に戻した」と読むので
+    上書きでも足りますが、消すほうが残骸が出ません)。
+    """
+    try:
+        from nippou import user_settings as theirs
+    except Exception:                             # noqa: BLE001 - 写しが無い
+        return
+    key = "stop_reason_file"                      # nippou.config.KEY_STOP_REASON_FILE
+    path = stop_csv_path(settings)
+    want = str(path) if path else ""
+    try:
+        now = theirs.get(key)
+        now = now.strip() if isinstance(now, str) else ""
+        if want == now:
+            return
+        if want:
+            theirs.save(key, want)
+        else:
+            theirs.forget(key)
+    except Exception:                             # noqa: BLE001 - 既定で続ける
+        pass

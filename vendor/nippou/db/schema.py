@@ -30,6 +30,14 @@ CREATE TABLE IF NOT EXISTS daily_header (
     saved_at                 TEXT NOT NULL,
     dirty                    INTEGER NOT NULL DEFAULT 1,
     synced_at                 TEXT,
+    -- いま入っている中身の指紋と、**共有へ出したときの**指紋
+    -- (`logic/fingerprint.page_fingerprint`)。
+    --
+    -- 2つ持つのは「送ったあとに直して、また元に戻した」を拾うため
+    -- です ── 戻せば指紋も戻るので、送り直しは要りません。
+    -- 同じなら `dirty` を立てない、が保存の決まりです(README v3.65.0)
+    content_hash              TEXT,
+    synced_hash               TEXT,
     PRIMARY KEY (report_date, line, shift, page)
 );
 
@@ -116,6 +124,10 @@ CREATE TABLE IF NOT EXISTS packing_report (
     productivity            REAL,               -- 生産性(t/h)
     dirty                   INTEGER NOT NULL DEFAULT 1,
     synced_at               TEXT,
+    -- 日報と同じ指紋のしくみ(`logic/fingerprint.summary_fingerprint`)。
+    -- 集計は保存のたびに作り直しますが、**中身が同じなら送り直しません**
+    content_hash            TEXT,
+    synced_hash             TEXT,
     created_at              TEXT NOT NULL,
     updated_at              TEXT NOT NULL,
     -- 同じ作業日・ライン・直を二重に持たない(再保存は入れ替え)
@@ -221,6 +233,55 @@ CREATE TABLE IF NOT EXISTS shift_handover (
     PRIMARY KEY (report_date, line, shift)
 );
 
+-- 月替わりの書き出しを済ませた月 ── **同じ月を何度も書き出さない**
+--
+-- 【なぜ要るのか】
+-- VBA は書き出したあと、その月のシートを消していました。次の月替わりの
+-- 判定は残っているシートを見るので、書き出した月は二度と候補に
+-- 上がりません。このツールは**手元の日報を消さない**ので、覚えておかないと
+-- いちばん古い月がいつまでも候補に残ります:
+--
+--     9月の共有へ保存のたびに 8月をまた書き出す
+--     10月になっても 8月を書き出し、**9月はいつまでも書き出されない**
+--
+-- 書き出したあとに、その月の日報の**中身が変わっていれば**(直した・
+-- 取り込んだ)書き出し直します。見るのは時刻ではなく中身の指紋
+-- (`content_hash` をその月ぶん束ねたもの)── 同じ中身を保存し直した
+-- だけなら出し直さず、1秒のうちに直しても見落としません。
+CREATE TABLE IF NOT EXISTS month_rollover (
+    year         INTEGER NOT NULL,
+    month        INTEGER NOT NULL,
+    done_at      TEXT NOT NULL,      -- 書き出しを済ませた時刻(ISO・人が読む用)
+    fingerprint  TEXT NOT NULL,      -- 書き出した時点の、その月の中身の指紋
+    PRIMARY KEY (year, month)
+);
+
+-- 共有保存の履歴 ── **各直で「共有へ保存」を押した時刻と担当者**
+--
+-- 押すたびに、送った直ごとに1行ずつ残します(送るものが無かった・関門で
+-- 止めた、も残す ── 押したこと自体が記録したいことなので)。
+--
+-- 共有の `日報データ.sqlite3` にも同じ行を `T_共有保存履歴` として写します
+-- (`services/push_history`)。`shared` は写し終えたかの印で、共有に
+-- 届かなかった行は次の「共有へ保存」でまとめて写します。
+CREATE TABLE IF NOT EXISTS push_history (
+    id            TEXT PRIMARY KEY,   -- 端末をまたいでも重ならない番号(uuid)
+    pressed_at    TEXT NOT NULL,      -- 押した日時(ISO)
+    report_date   TEXT NOT NULL,      -- 送った直(報告日・ライン・直)
+    line          TEXT NOT NULL,
+    shift         TEXT NOT NULL,
+    pages         INTEGER NOT NULL DEFAULT 0,   -- 送った(送ろうとした)ページ数
+    worker        TEXT NOT NULL DEFAULT '',     -- その直の担当者(作業者名)
+    result        TEXT NOT NULL,                -- 送れた / 送るもの無し / 関門で止めた / …
+    failed_pages  INTEGER NOT NULL DEFAULT 0,
+    detail        TEXT NOT NULL DEFAULT '',     -- 送れなかった・止めた理由
+    pressed_key   TEXT NOT NULL DEFAULT '',     -- 押したときの直(「2026年9月25日 2直」)
+    pressed_by    TEXT NOT NULL DEFAULT '',     -- 押したときの直の担当者
+    via           TEXT NOT NULL DEFAULT '',     -- 逃げ道の一文で通したとき、その文
+    terminal      TEXT NOT NULL DEFAULT '',     -- 押した端末(PC名)
+    shared        INTEGER NOT NULL DEFAULT 0    -- 共有の T_共有保存履歴 へ写したか
+);
+
 CREATE TABLE IF NOT EXISTS sync_log (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     direction    TEXT NOT NULL,   -- 'import' | 'push'
@@ -231,6 +292,21 @@ CREATE TABLE IF NOT EXISTS sync_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_daily_header_dirty ON daily_header (dirty);
+-- 標準作業時間へ、まだ写していない直 (`services/standard_time`)
+--
+-- 「共有へ保存」で送れた直は、共有の `標準作業時間.sqlite3` に実績として
+-- 写します。共有が開けなかったときはここに残り、次の「共有へ保存」で
+-- まとめて写します(写せたら消す)。
+CREATE TABLE IF NOT EXISTS standard_time_pending (
+    work_date   TEXT NOT NULL,
+    line        TEXT NOT NULL,
+    shift       TEXT NOT NULL,
+    queued_at   TEXT NOT NULL,
+    PRIMARY KEY (work_date, line, shift)
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_history_shared ON push_history (shared);
+CREATE INDEX IF NOT EXISTS idx_push_history_line_date ON push_history (line, report_date);
 CREATE INDEX IF NOT EXISTS idx_daily_header_line_date ON daily_header (line, report_date);
 CREATE INDEX IF NOT EXISTS idx_packing_report_line_date
     ON packing_report (line_name, work_date);
@@ -261,6 +337,13 @@ DROPPED_TABLES: tuple[str, ...] = ("daily_summary", "daily_stop_summary")
 ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("daily_detail", "hiki_no", "TEXT"),
     ("daily_detail", "reason", "TEXT"),
+    # 指紋。**空のまま足します** ── すでに送ってあるページは
+    # `synced_hash` が空なので、次の保存で1度だけ未送信に戻ります。
+    # そこで送れば指紋が揃い、以後は同じ中身なら立ちません
+    ("daily_header", "content_hash", "TEXT"),
+    ("daily_header", "synced_hash", "TEXT"),
+    ("packing_report", "content_hash", "TEXT"),
+    ("packing_report", "synced_hash", "TEXT"),
 )
 
 

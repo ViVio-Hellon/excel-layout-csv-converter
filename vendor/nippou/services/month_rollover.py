@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from ..db.repository import NippouRepository
 from ..logging_setup import get_logger
@@ -80,8 +80,61 @@ class RolloverResult:
 
 
 def check(repo: NippouRepository, today: Optional[date] = None) -> RollDecision:
-    """月替わりか(port of ``月替わりチェック実行``)。**消しも書きもしない。**"""
-    return decide(repo.month_keys(), today or date.today())
+    """月替わりか(port of ``月替わりチェック実行``)。**消しも書きもしない。**
+
+    書き出しを済ませた月は外します(`repository.settled_months`)。
+    """
+    return decide(repo.month_keys(), today or date.today(),
+                  settled=repo.settled_months())
+
+
+#: 共有へ保存1回で片付ける月の上限。取り込みで何年ぶんも入ったとき、
+#: 1回の保存が長く止まらないように(残りは次の保存で片付く)
+MAX_MONTHS_PER_RUN = 12
+
+
+def settle(repo: NippouRepository, result: "RolloverResult",
+           second_ok: bool = True) -> bool:
+    """書き出しを**済ませた**として覚える。覚えたら True。
+
+    済んだと言えるのは、次が全部そろったときだけです:
+
+        1つ目に書けた                     (`failed` でない)
+        その月に未送信のページが無い      (`pending` でない)
+        2つ目(決めてあれば)にも出せた     (`second_ok`)
+
+    どれかが欠けたら覚えません ── 次の「共有へ保存」でもう1度書き出します
+    (同じ中身を上書きするだけなので害はありません)。
+    """
+    if not result.ran or result.failed or result.pending or not second_ok:
+        return False
+    repo.mark_rolled(result.decision.year, result.decision.month)
+    return True
+
+
+def catch_up(repo: NippouRepository, base_dir: Path, *,
+             second: Optional[Callable[["RolloverResult"], Any]] = None,
+             today: Optional[date] = None) -> list[tuple["RolloverResult", Any]]:
+    """**済んでいない月を、古い順にぜんぶ**書き出す(共有へ保存の直後・押したとき)。
+
+    1か月ずつ: 1つ目へ書く → `second` で2つ目へ出す → 済んだと覚える。
+    済ませられなかった月(未送信が残る・書けなかった)があれば、そこで
+    止めます ── 次の「共有へ保存」でその月からやり直します。
+
+    `second` の戻りは `ok` を持つもの(`second_output.Outcome`)。
+    返すのは (1つ目の結果, 2つ目の結果) の並び。
+    """
+    done: list[tuple[RolloverResult, Any]] = []
+    for _ in range(MAX_MONTHS_PER_RUN):
+        decision = check(repo, today)
+        if not decision.due:
+            break
+        result = run(repo, base_dir, decision=decision)
+        extra = second(result) if second is not None else None
+        done.append((result, extra))
+        if not settle(repo, result, second_ok=getattr(extra, "ok", True)):
+            break
+    return done
 
 
 def stop_labels() -> dict[str, str]:

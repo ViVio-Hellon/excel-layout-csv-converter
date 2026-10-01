@@ -19,10 +19,11 @@ everywhere else, which the original VBA ``NippouDB_Save`` did not have.
 """
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import time
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Iterable, Optional
 
 from dbkit.sqlite_toolkit import (
     DEFAULT_MAX_RETRY,
@@ -33,6 +34,7 @@ from dbkit.sqlite_toolkit import (
 )
 
 from ..logic.aggregation import SHIFT_ORDER
+from ..logic.fingerprint import page_fingerprint, summary_fingerprint
 from ..logic.month_roll import next_month
 from ..logic.shift import parse_business_date
 from .connection import transaction
@@ -61,7 +63,8 @@ class NippouRepository:
     def save(self, header: HeaderRecord, details: list[DetailRecord]) -> None:
         """DELETE + INSERT the header and every detail row for this key
         in one transaction, exactly like ``NippouDB_Save`` did against
-        Access. Marks the header dirty so the Access pusher picks it up.
+        Access. Marks the header dirty **only when the content actually
+        changed** since it was pushed (see :mod:`nippou.logic.fingerprint`).
 
         This touches multiple tables in one atomic unit, so it can't be
         expressed as a single ``dbkit.sqlite_toolkit.execute_with_retry``
@@ -69,13 +72,33 @@ class NippouRepository:
         contention using the same classifier dbkit uses everywhere else,
         which the original VBA save routine did not have."""
         header.saved_at = _now_iso()
-        header.dirty = True
         key = header.key()
+
+        # **中身が変わっていなければ、未送信に戻さない。**
+        #
+        #     共有へ保存 をしてから 保存(確定) を行うと
+        #     共有へ未送信 1直ぶん になる
+        #     差分がなければやはり 共有へ保存 を何度も求める必要がないのでは
+        #
+        # 指紋を1つ取るだけです(`logic/fingerprint`)── 12行35欄を並べて
+        # SHA-256 を1回。この下の DELETE+INSERT 13本に比べれば無いに等しい
+        content_hash = page_fingerprint(header, details)
 
         retry_count = 0
         while True:
             try:
                 with transaction(self.conn):
+                    # **消す前に読みます。** やり直し(ロック待ち)のときも
+                    # 巻き戻った中身をもう一度見るので、答えが変わりません
+                    before = self.conn.execute(
+                        "SELECT synced_at, synced_hash FROM daily_header"
+                        " WHERE report_date=? AND line=? AND shift=? AND page=?",
+                        key).fetchone()
+                    sent_hash = (before["synced_hash"] or "") if before else ""
+                    # **共有と同じか。** 同じなら送った印もそのまま残す
+                    same_as_sent = bool(sent_hash) and sent_hash == content_hash
+                    header.dirty = not same_as_sent
+                    synced_at = before["synced_at"] if same_as_sent else None
                     self.conn.execute(
                         "DELETE FROM daily_detail WHERE report_date=? AND line=? AND shift=? AND page=?",
                         key,
@@ -89,14 +112,18 @@ class NippouRepository:
                         INSERT INTO daily_header
                             (report_date, line, shift, page, worker, day_shift, count,
                              weight_kg, lot_count, coefficient_lot_count, reason,
-                             saved_at, dirty, synced_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL)
+                             saved_at, dirty, synced_at, content_hash, synced_hash)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             header.report_date, header.line, header.shift, header.page,
                             header.worker, header.day_shift, header.count, header.weight_kg,
                             header.lot_count, header.coefficient_lot_count, header.reason,
-                            header.saved_at,
+                            header.saved_at, int(header.dirty), synced_at,
+                            content_hash,
+                            # **送ったときの指紋は消しません。** 直して、
+                            # また元に戻したときに「同じ」と分かるように
+                            sent_hash,
                         ),
                     )
                     for d in details:
@@ -164,6 +191,47 @@ class NippouRepository:
             return None
         header = self._header_from_row(row)
         return header, self._details_for(report_date, line, shift, page)
+
+    def delete_page(self, report_date: str, line: str, shift: str,
+                    page: int) -> bool:
+        """その紙を1枚まるごと消す。消したら True、無ければ False。
+
+        **明細と見出しを1つの取引で消します。** 片方だけ残ると、見出しの
+        無い明細(どの紙のものか分からない行)や、中身の無い見出しができます。
+
+        呼ぶのは「中身の無い紙を片付ける」だけです
+        (`services/empty_pages.py`)── 打ってある紙をここから消す道は
+        作っていません。消せるのは**中身が無いことを確かめたぶん**だけ、
+        という関門はサービスの側が持ちます。
+        """
+        key = (report_date, line, shift, page)
+        found = self.conn.execute(
+            "SELECT 1 FROM daily_header "
+            "WHERE report_date=? AND line=? AND shift=? AND page=?",
+            key).fetchone()
+        if found is None:
+            return False
+
+        retry_count = 0
+        while True:
+            try:
+                with transaction(self.conn):
+                    self.conn.execute(
+                        "DELETE FROM daily_detail "
+                        "WHERE report_date=? AND line=? AND shift=? AND page=?",
+                        key)
+                    self.conn.execute(
+                        "DELETE FROM daily_header "
+                        "WHERE report_date=? AND line=? AND shift=? AND page=?",
+                        key)
+                return True
+            except sqlite3.Error as exc:
+                # 保存と同じ待ち方。**鍵の取り合いだけ待ち直します**
+                if is_lock_error(exc) and retry_count < DEFAULT_MAX_RETRY:
+                    retry_count += 1
+                    time.sleep(DEFAULT_RETRY_WAIT_SEC * retry_count)
+                    continue
+                raise
 
     # ------------------------------------------------------------------
     # Key discovery (NippouDB_FillDBList / NippouDB_GetPageCount)
@@ -358,16 +426,23 @@ class NippouRepository:
         """
         now = _now_iso()
         report.updated_at = now
-        report.dirty = True
         key = report.key()
+        # **日報と同じ決まり。** 中身が共有と同じなら、送り直しません
+        # (`logic/fingerprint`)。集計は保存のたびに作り直されるので、
+        # これが無いと「打ち直していないのに毎回送る」ことになります
+        content_hash = summary_fingerprint(report, details)
         with transaction(self.conn):
             # 外部キーは接続ごとの設定。ここで確かめておく
             # (`connection.py` が入れているが、渡された接続でも効くように)
             self.conn.execute("PRAGMA foreign_keys = ON")
             old = self.conn.execute(
-                "SELECT id, created_at FROM packing_report"
+                "SELECT id, created_at, synced_at, synced_hash FROM packing_report"
                 " WHERE work_date=? AND line_name=? AND shift=?", key).fetchone()
             created = old["created_at"] if old else now
+            sent_hash = (old["synced_hash"] or "") if old else ""
+            same_as_sent = bool(sent_hash) and sent_hash == content_hash
+            report.dirty = not same_as_sent
+            synced_at = old["synced_at"] if same_as_sent else None
             if old:
                 self.conn.execute("DELETE FROM packing_report WHERE id=?",
                                   (old["id"],))
@@ -378,11 +453,13 @@ class NippouRepository:
                 f"""
                 INSERT INTO packing_report
                     (work_date, line_name, shift, {', '.join(REPORT_FIELDS)},
-                     dirty, synced_at, created_at, updated_at)
+                     dirty, synced_at, content_hash, synced_hash,
+                     created_at, updated_at)
                 VALUES (?,?,?, {', '.join('?' * len(REPORT_FIELDS))},
-                        1, NULL, ?, ?)
+                        ?, ?, ?, ?, ?, ?)
                 """,
                 (*key, *(getattr(report, f) for f in REPORT_FIELDS),
+                 int(report.dirty), synced_at, content_hash, sent_hash,
                  created, now))
             report_id = int(cursor.lastrowid)
             report.id = report_id
@@ -567,7 +644,8 @@ class NippouRepository:
     def mark_packing_report_synced(self, key: tuple[str, str, str]) -> None:
         execute_with_retry(
             self.conn,
-            "UPDATE packing_report SET dirty=0, synced_at=?"
+            "UPDATE packing_report SET dirty=0, synced_at=?,"
+            " synced_hash=content_hash"
             " WHERE work_date=? AND line_name=? AND shift=?",
             (_now_iso(), *key), caller_name="mark_packing_report_synced")
 
@@ -592,6 +670,128 @@ class NippouRepository:
             if parsed is not None:
                 months.add((parsed.year, parsed.month))
         return sorted(months)
+
+    def month_fingerprints(self) -> dict[tuple[int, int], str]:
+        """(年, 月) ごとの、**その月の中身の指紋**。
+
+        ページごとの指紋(`content_hash`)を鍵の順に束ねたもの。どれか
+        1ページでも中身が変わる・増える・減ると変わります。同じ中身を
+        保存し直しただけなら変わりません。
+        """
+        pages: dict[tuple[int, int], list[str]] = {}
+        for r in self.conn.execute(
+                "SELECT report_date, line, shift, page, content_hash FROM daily_header"):
+            parsed = parse_business_date(r["report_date"])
+            if parsed is None:
+                continue
+            pages.setdefault((parsed.year, parsed.month), []).append(
+                "\t".join((r["report_date"], r["line"], r["shift"], str(r["page"]),
+                           r["content_hash"] or "")))
+        return {month: hashlib.sha1("\n".join(sorted(items)).encode("utf-8")).hexdigest()
+                for month, items in pages.items()}
+
+    def mark_rolled(self, year: int, month: int) -> None:
+        """その月の月替わりの書き出しを済ませた(`month_rollover`)。
+
+        **いまの中身の指紋**も一緒に覚えます。書き込みは1つずつ通る
+        (`app/__init__.py` の `_WRITE_LOCK`)ので、書き出してからここまでの
+        あいだに別の保存が割り込むことはありません。
+        """
+        fingerprint = self.month_fingerprints().get((year, month), "")
+        self.conn.execute(
+            "INSERT INTO month_rollover (year, month, done_at, fingerprint) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(year, month) DO UPDATE SET "
+            "done_at=excluded.done_at, fingerprint=excluded.fingerprint",
+            (year, month, _now_iso(), fingerprint))
+        self.conn.commit()
+
+    def settled_months(self) -> set[tuple[int, int]]:
+        """書き出しを済ませ、**そのあと中身が変わっていない**月。
+
+        手元の日報は消さないので、これが無いと同じ月を何度も書き出し、
+        次の月がいつまでも書き出されません(`schema.py` の注記)。
+        """
+        rows = self.conn.execute(
+            "SELECT year, month, fingerprint FROM month_rollover").fetchall()
+        if not rows:
+            return set()
+        now = self.month_fingerprints()
+        return {(r["year"], r["month"]) for r in rows
+                if now.get((r["year"], r["month"])) == r["fingerprint"]}
+
+    # ------------------------------------------------------------------
+    # 共有保存の履歴 (`push_history`)
+    # ------------------------------------------------------------------
+    PUSH_HISTORY_COLUMNS = ("id", "pressed_at", "report_date", "line", "shift",
+                            "pages", "worker", "result", "failed_pages", "detail",
+                            "pressed_key", "pressed_by", "via", "terminal")
+
+    def add_push_history(self, rows: list[dict]) -> None:
+        """押した記録を足す。**消しも書き換えもしない**(履歴なので)。"""
+        if not rows:
+            return
+        cols = self.PUSH_HISTORY_COLUMNS
+        self.conn.executemany(
+            f"INSERT OR IGNORE INTO push_history ({', '.join(cols)}) "
+            f"VALUES ({', '.join('?' for _ in cols)})",
+            [tuple(row.get(c, "") if c not in ("pages", "failed_pages")
+                   else int(row.get(c) or 0) for c in cols) for row in rows])
+        self.conn.commit()
+
+    def push_history(self, *, unshared_only: bool = False) -> list[dict]:
+        """押した記録ぜんぶ(古い順)。`unshared_only` なら共有へ写していないものだけ。"""
+        sql = "SELECT * FROM push_history"
+        if unshared_only:
+            sql += " WHERE shared=0"
+        # 同じ秒に押した行は**書いた順**(id は乱数なので並びの鍵にしない)
+        sql += " ORDER BY pressed_at, rowid"
+        return [dict(r) for r in self.conn.execute(sql).fetchall()]
+
+    def mark_push_history_shared(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        self.conn.executemany("UPDATE push_history SET shared=1 WHERE id=?",
+                              [(i,) for i in ids])
+        self.conn.commit()
+
+    # -- 標準作業時間へ写す待ち (`services/standard_time`) ------------------
+    def queue_standard_time(self, keys: Iterable[tuple[str, str, str]]) -> None:
+        """写す待ちに入れる `(報告日, ライン, 直)`。同じ直は1つ。"""
+        rows = [(d, ln, s, datetime.now().isoformat(timespec="seconds"))
+                for d, ln, s in keys]
+        if not rows:
+            return
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO standard_time_pending"
+            " (work_date, line, shift, queued_at) VALUES (?, ?, ?, ?)", rows)
+        self.conn.commit()
+
+    def standard_time_pending(self) -> list[tuple[str, str, str]]:
+        """写す待ちの直(入れた順)。"""
+        return [(r["work_date"], r["line"], r["shift"]) for r in self.conn.execute(
+            "SELECT work_date, line, shift FROM standard_time_pending"
+            " ORDER BY queued_at, rowid")]
+
+    def clear_standard_time_pending(self, keys: Iterable[tuple[str, str, str]]) -> None:
+        rows = list(keys)
+        if not rows:
+            return
+        self.conn.executemany(
+            "DELETE FROM standard_time_pending WHERE work_date=? AND line=? AND shift=?",
+            rows)
+        self.conn.commit()
+
+    def shift_workers(self, report_date: str, line: str, shift: str) -> list[str]:
+        """その直の担当者(ページごとの作業者名。重なりは1つに、ページ順)。"""
+        rows = self.conn.execute(
+            "SELECT worker FROM daily_header WHERE report_date=? AND line=? AND shift=?"
+            " ORDER BY page", (report_date, line, shift)).fetchall()
+        names: list[str] = []
+        for r in rows:
+            name = (r["worker"] or "").strip()
+            if name and name not in names:
+                names.append(name)
+        return names
 
     def month_headers(self, year: int, month: int, line: Optional[str] = None
                       ) -> list[tuple[HeaderRecord, list[DetailRecord]]]:
@@ -622,9 +822,14 @@ class NippouRepository:
         return [self._header_from_row(r) for r in rows]
 
     def mark_synced(self, key: tuple[str, str, str, int]) -> None:
+        """送れた印。**そのときの指紋も控えます。**
+
+        次の保存はこの指紋と比べて、同じなら未送信に戻しません
+        (`logic/fingerprint`)。
+        """
         result = execute_with_retry(
             self.conn,
-            "UPDATE daily_header SET dirty=0, synced_at=? "
+            "UPDATE daily_header SET dirty=0, synced_at=?, synced_hash=content_hash "
             "WHERE report_date=? AND line=? AND shift=? AND page=?",
             (_now_iso(), *key),
             caller_name="mark_synced",
@@ -659,6 +864,30 @@ class NippouRepository:
         )
         if not result.ok:
             raise sqlite3.OperationalError(result.error or "set_shift_time failed")
+
+    def replace_shift_times(self, times: dict[str, tuple[str, str]]) -> None:
+        """手元の直の時刻を、**マスタの中身に揃える。**
+
+        `set_shift_time` を並べるだけだと、マスタから消えた直(マスタ管理で
+        「昼」の行を消した等)が手元に残り、消したのに効き続けます。
+        マスタに無い直は手元からも消します。
+
+        **空なら何もしません。** 空の結果は「読めなかった」と見分けが
+        つかないので、それで手元を消すと直の時刻がぜんぶ控えに戻ります。
+        """
+        if not times:
+            return
+        for key, (start, end) in times.items():
+            self.set_shift_time(key, start, end)
+        marks = ", ".join("?" for _ in times)
+        result = execute_with_retry(
+            self.conn,
+            f"DELETE FROM shift_config WHERE shift_key NOT IN ({marks})",
+            tuple(times),
+            caller_name="replace_shift_times",
+        )
+        if not result.ok:
+            raise sqlite3.OperationalError(result.error or "replace_shift_times failed")
 
     def get_shift_times(self) -> dict[str, tuple[str, str]]:
         rows = self.conn.execute("SELECT shift_key, start_time, end_time FROM shift_config").fetchall()

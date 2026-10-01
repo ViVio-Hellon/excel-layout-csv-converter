@@ -108,7 +108,9 @@ class SheetResult:
     rows: int = 0
     last_row: int = 0
     skipped: str = ""          # 拾わなかった理由(空なら拾った)
-    kind: str = "シート"        # シート / CSV(シート) / CSV(集計)
+    #: 拾ったけれど言っておくこと(内訳名が引けなかった記号など)
+    note: str = ""
+    kind: str = "シート"        # シート / CSV(シート) / CSV(集計) / CSV(集計明細)
 
     @property
     def taken(self) -> bool:
@@ -140,13 +142,26 @@ class Tally:
                 found.append(row[0])
         return found
 
+    @property
+    def notes(self) -> list[str]:
+        """拾ったけれど言っておくこと。**黙って飲み込みません。**"""
+        found: list[str] = []
+        for one in self.sheets:
+            if one.note and one.note not in found:
+                found.append(one.note)
+        return found
+
     def summary(self) -> str:
         if not self.rows:
-            return "拾える行がありませんでした"
+            return "拾える行がありませんでした" + self._tail()
         days = sorted(self.dates, key=_sort_key)
         span = f"{days[0]} 〜 {days[-1]}" if len(days) > 1 else (days[0] if days else "")
         return (f"{len(self.taken)} シートから {len(self.rows)} 行"
-                + (f"({span})" if span else ""))
+                + (f"({span})" if span else "") + self._tail())
+
+    def _tail(self) -> str:
+        notes = self.notes
+        return ("。" + "。".join(notes)) if notes else ""
 
 
 _DATE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
@@ -297,15 +312,20 @@ class _Grid:
         return self._rows.get(int(number), {}).get(column, "")
 
 
-def take_csv(path) -> tuple[list[list[str]], SheetResult]:
-    """CSV1本から行を拾う。**中身を見て2通りに分けます。**"""
+def take_csv(path, *, grid=None, stops: "StopNames | None" = None
+             ) -> tuple[list[list[str]], SheetResult]:
+    """CSV1本から行を拾う。**中身(1行目)を見て種類を決めます。**
+
+    `stops` は停止内訳CSVから作った記号→内訳名の対応です(あれば使います)。
+    """
     path = Path(path)
     result = SheetResult(file=path.name, sheet=path.name, kind="CSV")
-    try:
-        grid = read_grid(path)
-    except (ValueError, OSError) as exc:
-        result.skipped = str(exc)
-        return [], result
+    if grid is None:
+        try:
+            grid = read_grid(path)
+        except (ValueError, OSError) as exc:
+            result.skipped = str(exc)
+            return [], result
     if not grid:
         result.skipped = "空のCSVです"
         return [], result
@@ -317,9 +337,220 @@ def take_csv(path) -> tuple[list[list[str]], SheetResult]:
     if (grid[0][0] if grid[0] else "") == MARK_VALUE:
         return _take_grid_sheet(path, grid, result)
 
-    result.skipped = ("中身が分かりません(1行目が集計の見出しでも、"
-                      f"A1が「{MARK_VALUE}」でもありません)")
+    kind = csv_kind(head)
+    if kind == DETAIL_CSV:
+        return _take_detail_csv(grid, result, stops)
+    if kind == STOPS_CSV:
+        result.kind = "CSV(停止内訳)"
+        result.note = ("停止の記号→内訳名として使いました"
+                       "(集計の行は集計明細CSVかブックから拾います)")
+        return [], result
+    if kind:
+        result.skipped = (
+            f"{kind}のCSVです。機側データ集計の材料になるのは"
+            "**集計明細**のCSVかブックです(同じ日のフォルダに入っています)")
+        return [], result
+
+    result.skipped = ("中身が分かりません。入れられるのは ①日報のブック "
+                      f"②変換が出した集計明細のCSV ③シートをCSVで保存したもの"
+                      f"(A1が「{MARK_VALUE}」) ④前に出した機側データ集計のCSV "
+                      "です")
     return [], result
+
+
+# ------------------------------------------------------------------
+# 変換が出したCSVを、そのまま集計の材料にする
+#
+# 変換すると1日につき4本出ます(`集計` `集計明細` `停止内訳` `計算内容`)。
+# 現場は**日付フォルダごとドラッグ**するので、4本とも入ってきます。
+#
+#   集計明細 … **行の出どころ。** 1行=1行で、シートの8行目以降と同じ中身
+#   停止内訳 … 記号(リ・E…)の**内訳名**。集計明細には記号しか入っていません
+#   集計・計算内容 … 日ごとのまとめ。行の材料にはならないので、理由を言って飛ばす
+#
+# 【見出しの名前をここに書き写しません】
+# 列の名前(「梱包数量 個装単位 枚数」など)は移行元の定義から組み立てます
+# (`nippou.layout` と `nippou.logic.nippou_sheet`)。書き写すと、向こうで
+# 名前を直したときに**こちらだけ古くなり**、黙って拾えなくなります。
+# ------------------------------------------------------------------
+#: CSVの種類の呼び名。**画面にそのまま出ます**
+DETAIL_CSV = "集計明細"
+STOPS_CSV = "停止内訳"
+DAY_CSV = "日ごとの集計"
+FORMULA_CSV = "計算内容"
+
+#: 停止3枠。シートは「内容(S/U/W)+時間(T/V/X)」ですが、集計明細CSVには
+#: **記号(AJ/AL/AN)+時間(AK/AM/AO)しかありません**。同じ枠として扱います
+STOP_SLOTS: tuple[tuple[str, str, str, str], ...] = (
+    ("S", "T", "AJ", "AK"),
+    ("U", "V", "AL", "AM"),
+    ("W", "X", "AN", "AO"),
+)
+
+#: 終了時刻の「時」。**拾う行かどうかはここで決めます**(シートのL列と同じ)
+END_HOUR_COLUMN = "L"
+
+StopNames = dict
+
+
+def _vendor() -> tuple:
+    """移行元の定義(見出しと列の対応)を、まとめて借りる。"""
+    from nippou import layout
+    from nippou.logic.nippou_sheet import COLUMNS as FIELD_OF
+    from nippou.logic import formula
+    from nippou.reporting import csv_export
+    return layout, FIELD_OF, formula, csv_export
+
+
+def detail_labels() -> dict[str, str]:
+    """シートの列 → 集計明細CSVの見出し。**移行元の定義から組みます。**"""
+    layout, field_of, _formula, _csv_export = _vendor()
+    label_of = {column.family.lower(): layout.csv_header(column)
+                for column in (layout.COLUMNS + layout.EXTRA_COLUMNS)}
+    found: dict[str, str] = {}
+    for column, field in field_of.items():
+        label = label_of.get(field)
+        if label:
+            found[column] = label
+    return found
+
+
+def csv_kind(head: list[str]) -> str:
+    """1行目から、変換が出したどのCSVかを決める。**分からなければ空。**"""
+    _layout, _field_of, formula, csv_export = _vendor()
+    known = ((DETAIL_CSV, list(csv_export.DETAIL_FIELDNAMES)),
+             (STOPS_CSV, list(csv_export.STOP_FIELDNAMES)),
+             (DAY_CSV, list(csv_export.FIELDNAMES)),
+             (FORMULA_CSV, list(formula.CSV_FIELDNAMES)))
+    for name, fields in known:
+        if head[:len(fields)] == fields:
+            return name
+    # 列が増えた・減らされた版でも見分けられるように、**要る列がそろって
+    # いるか**で見ます(名前を書き写さず、上の定義から取った名前で見ます)
+    inside = set(head)
+    for name, fields in known:
+        needed = set(fields[:5] + fields[-1:])
+        if needed and needed <= inside:
+            return name
+    return ""
+
+
+def stop_names(grid: list[list[str]]) -> StopNames:
+    """停止内訳CSVから、記号→内訳名の対応を作る。
+
+    **行ごとの対応(日付・直・ページ・行・停止の位置)を先に見ます** ──
+    同じ記号でも、内訳名を付け替えた日があり得るので。見つからなければ
+    記号だけで引きます。内訳名が空の行は入れません(変換したときに
+    参照用マスタが読めていないとき)。
+    """
+    if not grid:
+        return {}
+    head = grid[0]
+    at = {name: index for index, name in enumerate(head)}
+    needed = ("日付", "直", "ページ", "行", "停止の位置", "記号", "内訳")
+    if any(name not in at for name in needed):
+        return {}
+    found: StopNames = {}
+    for line in grid[1:]:
+        if len(line) < len(head):
+            line = list(line) + [""] * (len(head) - len(line))
+        label = line[at["内訳"]].strip()
+        code = line[at["記号"]].strip()
+        if not label or not code:
+            continue
+        found.setdefault(("記号", code), label)
+        where = line[at["停止の位置"]].strip()
+        if where:
+            found[(line[at["日付"]].strip(), line[at["直"]].strip(),
+                   line[at["ページ"]].strip(), line[at["行"]].strip(),
+                   where)] = label
+    return found
+
+
+def _slot_label(index: int) -> str:
+    """停止の位置の呼び名(`作業停止①`)。**移行元の定義から。**"""
+    _layout, _field_of, _formula, csv_export = _vendor()
+    return csv_export.STOP_SLOT_LABELS.get(index, "")
+
+
+def _take_detail_csv(grid: list[list[str]], result: SheetResult,
+                     stops: StopNames | None):
+    """**変換が出した集計明細CSV**を、シートと同じに読む。
+
+    拾う行の条件は VBA と同じです ── 終了時刻が入っている行、または
+    停止(記号と時間)の対が書かれている行(`wanted`)。
+
+    停止の枠には、シートなら**内訳名**(S/U/W)が入っています。集計明細CSVに
+    あるのは**記号**だけなので、同じ日の停止内訳CSVがあればそこから内訳名を
+    引きます。引けない記号は**記号のまま入れて、そう言います**(黙って
+    空にしません)。
+    """
+    result.kind = "CSV(集計明細)"
+    stops = stops or {}
+    head = grid[0]
+    at = {name: index for index, name in enumerate(head)}
+    labels = detail_labels()
+
+    def source(column: str, name: str) -> int:
+        """シートの列に当たるCSVの位置。**無ければ -1。**"""
+        label = labels.get(column, "")
+        if label in at:
+            return at[label]
+        return at.get(name, -1)          # 「係数処理ﾛｯﾄ数」のように名前が同じもの
+
+    places = {column: source(column, name) for name, column in COLUMNS}
+    end_hour = source(END_HOUR_COLUMN, "")
+    taken: list[list[str]] = []
+    unknown: list[str] = []
+
+    for line in grid[1:]:
+        if not any(cell.strip() for cell in line):
+            continue
+        if len(line) < len(head):
+            line = list(line) + [""] * (len(head) - len(line))
+
+        def value(column: str) -> str:
+            place = places.get(column, -1)
+            return line[place].strip() if 0 <= place < len(line) else ""
+
+        values = {column: value(column) for _name, column in COLUMNS}
+        # 停止は「記号+時間」から。内訳名が引ければ名前に替えます
+        for index, (content, minutes, code_col, time_col) in enumerate(
+                STOP_SLOTS, start=1):
+            code_at, time_at = source(code_col, ""), source(time_col, "")
+            code = line[code_at].strip() if 0 <= code_at < len(line) else ""
+            span = line[time_at].strip() if 0 <= time_at < len(line) else ""
+            name = ""
+            if code:
+                key = (line[at["日付"]].strip() if "日付" in at else "",
+                       line[at["直"]].strip() if "直" in at else "",
+                       line[at["ページ"]].strip() if "ページ" in at else "",
+                       line[at["行"]].strip() if "行" in at else "",
+                       _slot_label(index))
+                name = stops.get(key) or stops.get(("記号", code)) or ""
+                if not name:
+                    name = code
+                    if code not in unknown:
+                        unknown.append(code)
+            values[content] = name
+            values[minutes] = span
+
+        if not ((0 <= end_hour < len(line) and line[end_hour].strip())
+                or any(values.get(c) and values.get(m)
+                       for c, m, _s, _t in STOP_SLOTS)):
+            continue
+        date = line[at["日付"]].strip() if "日付" in at else ""
+        taken.append([date] + [values.get(column, "")
+                               for _name, column in COLUMNS])
+
+    result.rows = len(taken)
+    result.date = taken[0][0] if taken else ""
+    if unknown:
+        result.note = ("停止の内訳名が分からない記号は、記号のまま入れました: "
+                       + " ".join(unknown[:8])
+                       + "(同じ日の停止内訳CSVを一緒に入れるか、設定部の"
+                         "「停止内訳CSVの置き場所」を指してください)")
+    return taken, result
 
 
 def _take_tallied(grid: list[list[str]], result: SheetResult):
@@ -425,18 +656,62 @@ def _fill_all(rows: list[list[str]]) -> None:
 # ------------------------------------------------------------------
 # まとめる
 # ------------------------------------------------------------------
+def _scan_csv(paths: list[Path]) -> tuple[dict, StopNames]:
+    """CSVを先に1度読み、表と**停止の内訳名**を集める。
+
+    読めなかったものは**ここでは何も言いません** ── そのまま
+    `take_csv` が読み直して、理由を1か所で言います(二重に言わない)。
+    """
+    grids: dict[Path, list[list[str]]] = {}
+    stops: StopNames = {}
+    for path in paths:
+        if path.suffix.lower() != ".csv":
+            continue
+        try:
+            grid = read_grid(path)
+        except (ValueError, OSError):
+            continue
+        grids[path] = grid
+        if grid and csv_kind(grid[0]) == STOPS_CSV:
+            for key, label in stop_names(grid).items():
+                stops.setdefault(key, label)
+    # **受け皿は設定部の停止内訳CSV(無ければ参照用マスタ)。**
+    # 一緒に入れた停止内訳CSVのほうが先 ── その日に使われていた名前なので
+    for code, label in master_names().items():
+        stops.setdefault(("記号", code), label)
+    return grids, stops
+
+
+def master_names() -> dict:
+    """設定部の停止内訳CSV / 参照用マスタからの 記号 → 内訳名。
+
+    読めなければ空を返します ── 名前が引けないことを理由に集計を
+    止めません(記号のまま入れて、そう言います)。
+    """
+    try:
+        from . import stop_reasons
+        return stop_reasons.codes()
+    except Exception:                             # noqa: BLE001 - 無しで続ける
+        return {}
+
+
 def build(paths, *, on_file=None) -> Tally:
     """ブックを順に読み、1枚の表にする。
 
     `paths` の順がそのまま**積む順**です(上詰めの補完は並び順で結果が
     変わるので、呼ぶ側が名前順に並べてから渡してください)。
     `on_file` は1冊終わるたびに呼ばれます(進み具合を出すため)。
+
+    **CSVは先に1度のぞきます**(`_scan_csv`) ── 停止内訳CSVの内訳名を、
+    集計明細CSVを読むときに使うためです。入れた順(ドラッグの順)に左右
+    されないように、先に全部集めます。
     """
     tally = Tally()
     paths = [Path(p) for p in paths]
+    grids, stops = _scan_csv(paths)
     for index, path in enumerate(paths, start=1):
         if path.suffix.lower() == ".csv":
-            rows, result = take_csv(path)
+            rows, result = take_csv(path, grid=grids.get(path), stops=stops)
             tally.rows.extend(rows)
             tally.sheets.append(result)
             if on_file:

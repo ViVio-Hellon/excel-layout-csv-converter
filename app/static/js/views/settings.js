@@ -7,7 +7,7 @@
 import { api, reason } from "../api.js";
 import * as toast from "../toast.js";
 
-const FIELDS = ["input_dir", "output_dir", "line", "ref_dir"];
+const FIELDS = ["input_dir", "output_dir", "line", "ref_dir", "stop_csv"];
 const $ = (id) => document.getElementById(id);
 
 function show(data) {
@@ -16,6 +16,16 @@ function show(data) {
       $(key).value = (data.settings && data.settings[key]) || "";
     }
   });
+  // 停止内訳が**どこから読めたか**。出どころが2つあるので、言わないと
+  // 「名前が空のまま」の理由が分かりません
+  const stops = $("stop-reasons");
+  if (stops) {
+    const found = data.stop_reasons;
+    const text = (found && found.text) || "";
+    stops.hidden = !text;
+    stops.textContent = text;
+    stops.className = "notice" + (found && found.ok ? "" : " warn");
+  }
   (data.paths || []).forEach((item) => {
     const hint = $("hint-" + item.key);
     if (!hint) { return; }

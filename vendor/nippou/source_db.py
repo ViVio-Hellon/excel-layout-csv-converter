@@ -45,6 +45,7 @@ import atexit
 import os
 import shutil
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -147,6 +148,11 @@ def copy_dir() -> Path:
     return _COPY_DIR
 
 
+def copy_dir_path() -> Path:
+    """写しの置き場所。**作らない**(見せるだけのとき ── 設定画面の一覧)。"""
+    return _COPY_DIR or app_config.local_dir("cache") / "source"
+
+
 def _copy_name(resolved: Path) -> str:
     """写しのファイル名。**元の名前が読める形にする。**
 
@@ -237,30 +243,95 @@ def local_copy(path: Path) -> Path:
     if known is not None and known[0] == stamp and known[1].exists():
         return known[1]
 
-    if not looks_like_sqlite(path):
-        # 中身が別物なら写しても開けない。**共有を無駄に往復させない**
-        raise SourceError(f"sqlite3 のファイルではありません: {path.name}")
-
-    target = copy_dir() / _copy_name(resolved)
-    last = ""
-    for attempt in range(1, COPY_RETRY + 1):
+    # 【写し直しは1つずつ・写しは置き換えで入れる】(v3.96.0)
+    # 画面は同じマスタを**同時に**何本も引く(VC長さ計算を開くと、計算と
+    # 設定の2本)。前は写しを**その場で上書き**していたので、ほかの要求が
+    # 開いて読んでいる最中の写しが一度空になり、「no such table」で落ちて
+    # いた。いまは別の名前へ写して確かめてから置き換える ── 読んでいる
+    # 側は、読み終わるまで前の写しを持ったまま
+    with _refresh_lock(key):
+        known = _COPIES.get(key)                 # 待っているあいだに写し終わった
+        if known is not None and known[0] == stamp and known[1].exists():
+            return known[1]
+        if not looks_like_sqlite(path):
+            # 中身が別物なら写しても開けない。**共有を無駄に往復させない**
+            raise SourceError(f"sqlite3 のファイルではありません: {path.name}")
+        target = copy_dir() / _copy_name(resolved)
+        part = target.with_name(f".{target.name}.{os.getpid()}.part")
         try:
-            _do_copy(resolved, target)
-        except OSError as exc:
-            raise SourceError(f"{path.name} を手元に写せません: {exc}") from exc
-        if _is_intact(target):
-            if attempt > 1:
-                log.info("%s は %s回目の写しで揃いました", path.name, attempt)
-            _COPIES[key] = (stamp, target)
-            return target
-        last = "写しが途中で切れています"
-        log.warning("%s の写しが揃っていません(%s回目)。写し直します",
-                    path.name, attempt)
-        time.sleep(COPY_RETRY_WAIT_SEC)
+            last = ""
+            for attempt in range(1, COPY_RETRY + 1):
+                try:
+                    _do_copy(resolved, part)
+                except OSError as exc:
+                    raise SourceError(f"{path.name} を手元に写せません: {exc}") from exc
+                if _is_intact(part):
+                    if attempt > 1:
+                        log.info("%s は %s回目の写しで揃いました", path.name, attempt)
+                    _swap_in(part, target, path.name)
+                    _COPIES[key] = (stamp, target)
+                    return target
+                last = "写しが途中で切れています"
+                log.warning("%s の写しが揃っていません(%s回目)。写し直します",
+                            path.name, attempt)
+                time.sleep(COPY_RETRY_WAIT_SEC)
+        finally:
+            _discard(part)
 
     raise SourceError(
         f"{path.name} を読める形で写せませんでした({last})。"
         "書き込みが終わってからもう一度お試しください。")
+
+
+# 写し直しの鍵(元のファイルごと)。**別のマスタの写し直しは待たせない**
+_REFRESH_LOCKS: dict[str, threading.Lock] = {}
+_REFRESH_GUARD = threading.Lock()
+
+# 写しを置き換えるとき、ほかの要求がまだ前の写しを開いていれば待つ回数と間隔。
+# **Windows は開いているファイルを置き換えられない。** 読みは数ミリ秒で終わる
+SWAP_RETRY = 30
+SWAP_RETRY_WAIT_SEC = 0.1
+
+
+def _refresh_lock(key: str) -> threading.Lock:
+    with _REFRESH_GUARD:
+        return _REFRESH_LOCKS.setdefault(key, threading.Lock())
+
+
+def _swap_in(part: Path, target: Path, name: str) -> None:
+    """確かめ終えた写し(`part`)を `target` に置き換える。
+
+    付き添いが残っていれば**先に**置く(`_do_copy` と同じ順)。前の写しの
+    付き添いは消す ── 新しい本体に古い `-wal` が付くのが一番たちが悪い。
+    """
+    for attempt in range(1, SWAP_RETRY + 1):
+        try:
+            for extra in SIDECARS:
+                side = Path(str(part) + extra)
+                beside = Path(str(target) + extra)
+                if side.exists():
+                    os.replace(side, beside)
+                else:
+                    beside.unlink(missing_ok=True)
+            os.replace(part, target)
+            return
+        except PermissionError:                  # Windows: まだ前の写しを読んでいる
+            if attempt == SWAP_RETRY:
+                break
+            time.sleep(SWAP_RETRY_WAIT_SEC)
+        except OSError as exc:
+            raise SourceError(f"{name} の写しを置き換えられません: {exc}") from exc
+    raise SourceError(f"{name} の写しを置き換えられません(ほかの読み込みが使っています)。"
+                      "少し待ってからもう一度お試しください。")
+
+
+def _discard(part: Path) -> None:
+    """置き換えなかった(途中で断った)写しを片づける。"""
+    for extra in ("", *SIDECARS):
+        try:
+            Path(str(part) + extra).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def forget(path: Optional[Path] = None) -> None:
@@ -524,13 +595,18 @@ def list_source_files(directory: Path) -> list[Path]:
 class SourceConnection:
     """書き込み用に開いた取り込み元。**書けるのはここだけ。**"""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, foreign_keys: bool = False) -> None:
         self.path = Path(path)
         try:
             self._conn = sqlite3.connect(str(self.path),
                                          timeout=BUSY_TIMEOUT_MS / 1000)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+            if foreign_keys:
+                # 表どうしの結びつき(品種名で親子)を守らせる。**表で決めてある
+                # ファイルだけ**(VC計算マスタ)── 上流が作ったファイルに
+                # 途中から効かせると、関係の無い行まで書けなくなりうる
+                self._conn.execute("PRAGMA foreign_keys = ON")
         except sqlite3.Error as exc:
             raise SourceError(f"{self.path.name} を開けません: {exc}") from exc
 
@@ -612,6 +688,6 @@ class SourceConnection:
             list(where.values()))
 
 
-def connect(path: Path) -> SourceConnection:
+def connect(path: Path, *, foreign_keys: bool = False) -> SourceConnection:
     """書き込み用に開く。**読むだけなら `read_query` を使う。**"""
-    return SourceConnection(path)
+    return SourceConnection(path, foreign_keys=foreign_keys)

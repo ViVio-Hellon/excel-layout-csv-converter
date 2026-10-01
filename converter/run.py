@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import check, totals, workday
+from .books import first_sheet
 
 #: 読む拡張子。`.xls`(古い形式)は ZIP ではないので読めません
 SUFFIXES = (".xlsx", ".xlsm")
@@ -128,10 +129,13 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
         for book in books:
             one = FileResult(path=book, name=book.name)
             try:
-                # **1冊につき1回だけ読みます。** 頭・明細・検算で3回開いて
-                # いたのを1回にまとめています(共有フォルダでは往復が効く)
-                sheet_name = xlsx_sheet.sheet_name(book)
-                rows = xlsx_sheet.rows_of(xlsx_sheet.read_cells(book))
+                # **1冊につき1回だけ開きます。** 頭・明細・検算で3回開いて
+                # いたのを1回にまとめています(共有フォルダでは往復が効く)。
+                # 読み手は集計側と同じ `converter/cells` ── ふりがなを値に
+                # 混ぜない一点だけ、移行元から直してあります
+                page = first_sheet(book)
+                sheet_name = page.name
+                rows = xlsx_sheet.rows_of(page.cells)
                 # 作業日が `2025/7/15` のような書き方のブックがあります。
                 # **同じ日付**なので、読める形に直してから渡します
                 rows, one.note = workday.fix_rows(rows, sheet_name)

@@ -7,24 +7,22 @@
 名前に `_機側` を含むものだけを拾います。同じ判定をするには、シートを
 並べられる必要があります。
 
-**値の読み方は既存のものをそのまま使います**(`_shared_strings` /
-`_value_of`)。ここで独自に解釈すると、同じセルが読み手によって違う値に
-なり得ます ── 数の出どころを2通りにしないのが、このリポジトリの約束です
-(VENDOR.md)。
+**値の読み方は1つに寄せます**(`converter/cells.py`)。同じセルが読み手に
+よって違う値になるのを避けるためで、変換側(先頭シート)もここを通します。
+`cells.py` は移行元の読み方そのままですが、**ふりがな(rPh)を値に混ぜない**
+一点だけ直してあります(理由は `cells.py` の頭に書いてあります)。
 """
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from nippou.logic import xlsx_sheet
-from nippou.logic.xlsx_sheet import NotXlsx
 
-_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
-_DOC_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+from . import cells
+from .cells import NotXlsx
+
+__all__ = ["NotXlsx", "Sheet", "first_sheet", "read_sheets"]
 
 
 @dataclass
@@ -48,44 +46,22 @@ def read_sheets(path) -> list[Sheet]:
     並び順を変えません ── VBA の `For Each ws In wb.Worksheets` と同じ順で
     拾わないと、同じ行が違う順番で積まれます(転記は順番で結果が変わる)。
     """
-    try:
-        book = zipfile.ZipFile(Path(path))
-    except zipfile.BadZipFile as exc:
-        raise NotXlsx("xlsx ではありません(ZIPとして開けません)") from exc
-
     found: list[Sheet] = []
-    with book:
-        names = book.namelist()
-        try:
-            workbook = ET.fromstring(book.read("xl/workbook.xml"))
-            rels = ET.fromstring(book.read("xl/_rels/workbook.xml.rels"))
-        except KeyError as exc:                    # xlsx の形をしていない
-            raise NotXlsx(f"xlsx の中身が足りません({exc})") from exc
-
-        strings = xlsx_sheet._shared_strings(book)     # noqa: SLF001 - 既存の読み方
-        targets = {rel.get("Id"): rel.get("Target")
-                   for rel in rels.iter(f"{_REL_NS}Relationship")}
-        for sheet in workbook.iter(f"{_NS}sheet"):
-            target = targets.get(sheet.get(f"{_DOC_REL}id"), "")
-            if not target:
-                continue
-            inside = target if target.startswith("xl/") else f"xl/{target.lstrip('/')}"
-            if inside not in names:
-                continue
-            found.append(Sheet(name=sheet.get("name", ""),
-                               cells=_cells_of(book.read(inside), strings)))
-    if not found:
-        raise NotXlsx("シートが1枚もありません")
+    with cells.open_book(Path(path)) as book:
+        strings = cells.shared_strings(book)
+        for name, inside in cells.sheet_paths(book):
+            found.append(Sheet(name=name,
+                               cells=cells.cells_of(book.read(inside), strings)))
     return found
 
 
-def _cells_of(xml: bytes, strings: list[str]) -> dict:
-    """`{"A1": "値"}`。**中身のあるセルだけ**(既存の読み手と同じ約束)。"""
-    root = ET.fromstring(xml)
-    found: dict[str, str] = {}
-    for cell in root.iter(f"{_NS}c"):
-        ref = cell.get("r") or ""
-        text = xlsx_sheet._value_of(cell, strings)      # noqa: SLF001
-        if ref and text.strip():
-            found[ref] = text.strip()
-    return found
+def first_sheet(path) -> Sheet:
+    """先頭のシート1枚。**1冊につき1回しか開きません。**
+
+    変換(`converter/run.py`)はここを通ります ── 名前と中身を別々に取ると
+    同じブックを2回開くことになり、共有フォルダでは往復が効きます。
+    """
+    with cells.open_book(Path(path)) as book:
+        strings = cells.shared_strings(book)
+        name, inside = cells.sheet_paths(book)[0]
+        return Sheet(name=name, cells=cells.cells_of(book.read(inside), strings))

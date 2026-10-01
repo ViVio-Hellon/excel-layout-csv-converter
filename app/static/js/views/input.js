@@ -36,6 +36,12 @@ const ZONES = {
     clear: "tally-intake-clear", count: "tally-intake-count",
     list: "tally-intake-list", msg: "tally-intake-msg",
     accept: /\.(xlsx|xlsm|csv)$/i, label: ".xlsx / .xlsm / .csv",
+    // 変換すると1日に4本出ます。集計の材料になるのは集計明細で、
+    // 停止内訳は記号→内訳名に使います。**残る2本は送りません** ──
+    // 受け入れは100本までなので、材料にならないものに枠を使わせない
+    // (名前を変えられていても、サーバ側が中身を見て理由を言います)
+    skip: /^(集計|計算内容)_/,
+    skipLabel: "集計・計算内容のCSV",
   },
 };
 
@@ -108,8 +114,17 @@ export function refresh(kind) {
 
 async function receive(zone, files) {
   files = filterFiles(zone, files);
+  let passed = 0;
+  if (zone.skip) {
+    const keep = files.filter((file) => !zone.skip.test(file.name || ""));
+    passed = files.length - keep.length;
+    files = keep;
+  }
   if (!files.length) {
-    return toast.bad(zone.msg, "読めるものがありませんでした(" + zone.label + ")");
+    const why = passed
+      ? zone.skipLabel + "だけでした(集計の材料は集計明細のCSVかブックです)"
+      : "読めるものがありませんでした(" + zone.label + ")";
+    return toast.bad(zone.msg, why);
   }
   const limit = window.APP.max_files || 100;
   let extra = 0;
@@ -148,6 +163,10 @@ async function receive(zone, files) {
   await refresh(zone.kind);
 
   let message = files.length + " 本を受け取りました";
+  if (passed) {
+    message += " ── " + zone.skipLabel + "(" + passed
+      + " 本)は集計の材料にならないので送っていません";
+  }
   if (extra) {
     message += " ── " + limit + " 本を超えたぶん(" + extra + " 本)は受け取っていません";
   }

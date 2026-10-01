@@ -37,6 +37,13 @@ export function isActive() {
 
 /** 覆いを出して、操作を止める。**断るときは理由を必ず添えます。** */
 export function gate(title, detail, note, options = {}) {
+  if (active) {
+    // **使わなくなった画面は占有を返します。** 返さないと、覆いが出た
+    // あと別のタブを開けるまで期限切れ(既定60秒)を待つことになります。
+    // 持ち主でなければサーバ側が素通りさせるので、断られた2枚目が
+    // これで人の画面を落とすことはありません(`screen_lock.release`)
+    api("/api/screen/release", { json: {}, keepalive: true });
+  }
   active = false;
   useScreen("");
   $("gate-title").textContent = title;
@@ -120,6 +127,32 @@ export async function claim() {
   $("gate").hidden = true;
   $("main").hidden = false;
   document.body.classList.remove("booting");
+  return true;
+}
+
+/**
+ * 占有を**黙って取り直す**。取れたら `true`。
+ *
+ * 裏に回ったタブは、ブラウザが心拍(タイマー)を間引いたり止めたりします
+ * (Chrome は数分で凍結します)。すると生存確認が途切れ、サーバ側の占有が
+ * 期限切れになり、戻ってきたときに「使えなくなりました」の覆いが出ます
+ * ── 利用者の言葉で「裏に回って復帰させると停止している(触ると戻るが)」。
+ *
+ * **誰も使っていないなら、断る理由はありません。** 同じタブ(`tab_id`)で
+ * もう一度名乗り直すだけです。ほかの画面が持っていれば断られるので、
+ * 「画面は1枚」は変わりません。
+ */
+export async function regain() {
+  if (!active) { return false; }
+  let result;
+  try {
+    result = await api("/api/screen/claim",
+                       { json: { tab_id: tabId(), load_id: loadId } });
+  } catch (e) {
+    return false;
+  }
+  if (!result.ok) { return false; }
+  useScreen(result.data.screen_id);
   return true;
 }
 

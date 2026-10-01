@@ -129,7 +129,7 @@ function renderResult(job, tally) {
     const cells = tally
       ? [[file.mark, "mark"], [file.name, ""], [file.report_date, ""],
          [file.verify, ""], [file.rows || "", "num"],
-         [file.error || "", "detail"]]
+         [file.error || file.note || "", "detail"]]
       : [[file.mark, "mark"], [file.name, ""], [file.report_date, ""],
          [(file.line_text ? file.line_text + "→" : "") + file.line, ""],
          [file.pages || "", "num"], [file.rows || "", "num"],
