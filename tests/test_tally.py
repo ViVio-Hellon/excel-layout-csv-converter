@@ -615,13 +615,34 @@ class ライン別に分ける(Base):
             self.assertEqual(len(rows), 2)        # 見出し + 1行
             self.assertEqual(rows[1][tally.LOT], lot)
 
-    def test_列の並びはどのラインでも同じ(self) -> None:
-        """**様式は変えません。** 使わない欄が空になるだけです。"""
-        hvc = self.book({8: {"D": "H1", "L": "9"}}, name="2026年8月23日_HVC")
-        found = tally.build([hvc], any_sheet=True)
-        made = tally.write_csvs(found, self.tmp / "out")[0]
-        head = made.read_text(encoding="utf-8-sig").splitlines()[0]
-        self.assertEqual(head.lstrip("\ufeff").split(","), list(tally.HEADERS))
+    def test_板とコイルで列が違う(self) -> None:
+        """**板、コイルで集計が違う**ので、並びも分けます。
+
+        先頭20列(日付＋共通19項目)は同じ位置で、後ろだけ入れ替わります:
+
+            コイル  … 縦割・横割・係数処理ﾛｯﾄ数(VBAの転記列のまま)
+            板      … 合紙・ＶＣ種別(VBAには無い ── 機側では使わない欄)
+        """
+        ls = self.book({8: {"D": "L1", "L": "9", "AQ": "2", "B": "820"}},
+                       file="ls.xlsx", name="2026年8月23日_機側")
+        hvc = self.book({8: {"D": "H1", "L": "9", "O": "有", "R": "両面"}},
+                        file="hvc.xlsx", name="2026年8月23日_HVC")
+        found = tally.build([ls, hvc], any_sheet=True)
+        made = {p.name: p for p in tally.write_csvs(found, self.tmp / "out")}
+
+        coil = list(csv.reader(made["機側データ集計_LS_2026.08.23.csv"]
+                               .read_text(encoding="utf-8-sig").splitlines()))
+        self.assertEqual(coil[0], list(tally.HEADERS))
+        self.assertEqual(coil[0][-3:], ["縦割", "横割", "係数処理ﾛｯﾄ数"])
+        self.assertEqual(coil[1][-3:], ["2", "", "820"])
+
+        plate = list(csv.reader(made["機側データ集計_HVC_2026.08.23.csv"]
+                                .read_text(encoding="utf-8-sig").splitlines()))
+        self.assertEqual(plate[0], list(tally.SHEET_HEADERS))
+        self.assertEqual(plate[0][-2:], ["合紙", "ＶＣ種別"])
+        self.assertEqual(plate[1][-2:], ["有", "両面"])
+        # **先頭20列は同じ位置**(並べて見てもずれない)
+        self.assertEqual(coil[0][:20], plate[0][:20])
 
     def test_ラインをまたいで埋めない(self) -> None:
         """**ここが分ける一番の理由です。**

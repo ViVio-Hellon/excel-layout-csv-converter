@@ -53,7 +53,9 @@ _FALLBACK: dict[str, Any] = {
         "job_poll_ms": 400,
         "idle_exit_minutes": 30,
     },
-    "defaults": {"input_dir": "", "output_dir": "", "line": "", "ref_dir": ""},
+    "defaults": {"input_dir": "", "output_dir": "", "line": "", "ref_dir": "",
+                 "stop_csv": ""},
+    "lines": {"coil": ["LS"]},
 }
 
 _cache: Optional[dict[str, Any]] = None
@@ -183,6 +185,23 @@ def max_files() -> int:
 
 def max_file_bytes() -> int:
     return int(load()["limits"]["max_file_mb"]) * 1024 * 1024
+
+
+# ------------------------------------------------------------------
+# ライン ── コイルと板で、機側データ集計の列が変わります
+# ------------------------------------------------------------------
+def coil_lines() -> tuple[str, ...]:
+    r"""コイルのライン名(既定 `LS`)。**ここに無いラインは板あつかい**です。
+
+    機側データ集計の後ろ3列が入れ替わります(コイルは縦割・横割・
+    係数処理ﾛｯﾄ数、板は合紙・ＶＣ種別)。コイルのラインが増えたら
+    `config/app.json` の `lines.coil` に足してください ── 現場で変わる
+    値なので、コードではなく設定に置いてあります。
+    """
+    found = load().get("lines", {}).get("coil", [])
+    if isinstance(found, str):
+        found = [found]
+    return tuple(str(one).strip() for one in found if str(one).strip())
 
 
 # ------------------------------------------------------------------

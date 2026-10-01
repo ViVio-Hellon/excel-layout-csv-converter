@@ -51,8 +51,8 @@ MARK_CELL = "A1"
 MARK_VALUE = "集計"
 NAME_MARK = "_機側"
 
-#: 見出しと、その値を取る列(停止3枠)。**並び順がそのままCSVの列順**です
-COLUMNS: tuple[tuple[str, str], ...] = (
+#: どのラインでも同じ19項目。**並び順がそのままCSVの列順**です(停止3枠)
+SHARED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("ロット№", "D"),
     ("材・調質", "E"),
     ("サイズ", "F"),
@@ -72,22 +72,76 @@ COLUMNS: tuple[tuple[str, str], ...] = (
     ("etc", "AI"),
     ("包装仕様NO", "AH"),
     ("作業人数", "N"),
+)
+
+#: コイルだけが使う欄。**VBAの転記列はここまで**(機側ライン用のマクロなので)
+COIL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("縦割", "AQ"),
     ("横割", "AR"),
     ("係数処理ﾛｯﾄ数", "B"),
 )
+
+#: 板だけが使う欄。**VBAには入っていません** ── 機側では使わない欄なので
+#: 転記列に無く、板の集計には要る(利用者の言葉で「板、コイルで集計が違う」)
+PLATE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("合紙", "O"),
+    ("ＶＣ種別", "R"),
+)
+
+#: コイルの並び(**VBAの集計シートそのまま**)。既定はこちら
+COLUMNS: tuple[tuple[str, str], ...] = SHARED_COLUMNS + COIL_COLUMNS
+
+#: 板の並び。共通の19項目は**同じ位置**で、後ろ3列だけ入れ替わります
+SHEET_COLUMNS: tuple[tuple[str, str], ...] = SHARED_COLUMNS + PLATE_COLUMNS
 
 #: CSVの見出し。1列目は日付(シート名から採る)。
 #: **「時間（分）」が3回出ます** ── VBAの見出しをそのまま使っているためで、
 #: 直すと「VBAの集計シートと同じもの」ではなくなります
 HEADERS: tuple[str, ...] = ("日付",) + tuple(name for name, _col in COLUMNS)
 
+#: 板の見出し(23列 → 22列。縦割・横割・係数処理ﾛｯﾄ数 が 合紙・ＶＣ種別 に)
+SHEET_HEADERS: tuple[str, ...] = ("日付",) + tuple(
+    name for name, _col in SHEET_COLUMNS)
+
+#: コイルのライン。**ここに無いラインは板あつかい**です(集計の列が変わります)。
+#: 出どころは `config/app.json` の `lines.coil` ── 増えたらそこに足せます
+DEFAULT_COIL_LINES: tuple[str, ...] = ("LS",)
+
+
+def coil_lines() -> tuple[str, ...]:
+    """コイルのライン名。読めなければ既定(`LS`)。"""
+    try:
+        from . import app_config
+        return app_config.coil_lines()
+    except Exception:                             # noqa: BLE001 - 既定で続ける
+        return DEFAULT_COIL_LINES
+
+
+def is_coil(line: str) -> bool:
+    """そのラインはコイルか。**空(ラインが分からない)はコイルあつかい**
+    ── VBAの並び(機側=コイル)が既定だからです。"""
+    return not line or line in coil_lines()
+
+
+def columns_for(line: str) -> tuple[tuple[str, str], ...]:
+    return COLUMNS if is_coil(line) else SHEET_COLUMNS
+
+
+def headers_for(line: str) -> tuple[str, ...]:
+    return HEADERS if is_coil(line) else SHEET_HEADERS
+
+
 # 表の中の位置(0始まり)。VBA の列番号との対応は docs/機側データ集計.md
 LOT = 1                      # ロット№(ロット単位の補完はこれを鍵にする)
 _FILL_DOWN = (1, 2, 3, 4, 5, 6)          # ロット№〜用途名(VBA: 2〜7列)
 _FILL_DOWN_WORKERS = 19                  # 作業人数(VBA: 20列)
 _FILL_BY_LOT_TO = 7                      # 納入先(VBA: 8列)
-_FILL_BY_LOT = (17, 18, 20, 21, 22)      # etc・包装仕様NO・縦割・横割・係数処理ﾛｯﾄ数
+#: ロット単位で埋める欄。**後ろの3列はラインで入れ替わります**
+#: コイル: etc・包装仕様NO・縦割・横割・係数処理ﾛｯﾄ数
+#: 板    : etc・包装仕様NO・合紙・ＶＣ種別
+#:         (どちらもロットに付く値なので、VBAの `etc埋め` と同じ埋め方)
+_FILL_BY_LOT = (17, 18, 20, 21, 22)
+_FILL_BY_LOT_SHEET = (17, 18, 20, 21)
 
 #: 見出しの確かめ。**ここがずれていたら別テンプレート**なので読みません
 CHECK_CELLS: tuple[tuple[str, str], ...] = (
@@ -402,11 +456,12 @@ def take_sheet(sheet, *, file_name: str = "",
     result.last_row = last_row_of(rows)
     taken: list[list[str]] = []
     previous_lot = ""                     # **シートごとに持ち直します**
+    columns = columns_for(result.line)    # 板とコイルで後ろ3列が違います
     for number in range(FIRST_ROW, result.last_row + 1):
         values = rows.get(number, {})
         if not wanted(values):
             continue
-        line = [result.date] + [values.get(col, "") for _name, col in COLUMNS]
+        line = [result.date] + [values.get(col, "") for _name, col in columns]
         # A列のロット。実物では空ですが、VBA が見ているので同じに見ます
         current = values.get("A", "")
         if current:
@@ -503,7 +558,7 @@ def take_csv(path, *, grid=None, stops: "StopNames | None" = None
         return [], result
 
     head = [cell for cell in grid[0]]
-    if head[:len(HEADERS)] == list(HEADERS):
+    if head[:len(HEADERS)] == list(HEADERS) or head[:len(SHEET_HEADERS)] == list(SHEET_HEADERS):
         return _take_tallied(grid, result)
 
     if (grid[0][0] if grid[0] else "") == MARK_VALUE:
@@ -677,7 +732,8 @@ def _take_detail_csv(grid: list[list[str]], result: SheetResult,
             return at[label]
         return at.get(name, -1)          # 「係数処理ﾛｯﾄ数」のように名前が同じもの
 
-    places = {column: source(column, name) for name, column in COLUMNS}
+    columns = columns_for(result.line)     # 板とコイルで後ろ3列が違います
+    places = {column: source(column, name) for name, column in columns}
     end_hour = source(END_HOUR_COLUMN, "")
     taken: list[list[str]] = []
     unknown: list[str] = []
@@ -692,7 +748,7 @@ def _take_detail_csv(grid: list[list[str]], result: SheetResult,
             place = places.get(column, -1)
             return line[place].strip() if 0 <= place < len(line) else ""
 
-        values = {column: value(column) for _name, column in COLUMNS}
+        values = {column: value(column) for _name, column in columns}
         # 停止は「記号+時間」から。内訳名が引ければ名前に替えます
         for index, (content, minutes, code_col, time_col) in enumerate(
                 STOP_SLOTS, start=1):
@@ -720,7 +776,7 @@ def _take_detail_csv(grid: list[list[str]], result: SheetResult,
             continue
         date = line[at["日付"]].strip() if "日付" in at else ""
         taken.append([date] + [values.get(column, "")
-                               for _name, column in COLUMNS])
+                               for _name, column in columns])
 
     result.rows = len(taken)
     result.date = taken[0][0] if taken else ""
@@ -749,22 +805,46 @@ def line_of_name(stem: str) -> str:
 
 
 def _take_tallied(grid: list[list[str]], result: SheetResult):
-    """**前に出した集計**。そのまま積み増します(VBAの追記と同じ)。"""
+    """**前に出した集計**。そのまま積み増します(VBAの追記と同じ)。
+
+    コイルの並び(23列)でも板の並び(22列)でも読めます。入ってきた並びと、
+    名前から分かるラインの並びが違うときは、**そのラインの並びへ移します**
+    ── 1つのCSVの中で列の数が揃っていないと、開いたときに読めません。
+    """
     result.kind = "CSV(集計)"
     result.line = line_name(line_of_name(Path(result.file).stem))
-    width = len(HEADERS)
+    source = list(grid[0])
+    target = list(headers_for(result.line))
     rows: list[list[str]] = []
     for line in grid[1:]:
         if not any(line):
             continue
-        if len(line) > width:
+        if len(line) > len(source):
             result.skipped = (f"列が多すぎます({len(line)} 列。"
-                              f"集計は {width} 列です)")
+                              f"集計は {len(source)} 列です)")
             return [], result
-        rows.append(list(line) + [""] * (width - len(line)))
+        filled = list(line) + [""] * (len(source) - len(line))
+        rows.append(filled if source == target else _remap(filled, source, target))
     result.rows = len(rows)
     result.date = rows[0][0] if rows else ""
     return rows, result
+
+
+def _remap(row: list[str], source: list[str], target: list[str]) -> list[str]:
+    """行を、別のラインの並びへ移す。
+
+    **先頭(日付＋共通19項目)は同じ位置**なのでそのまま、残りは見出しの
+    名前で突き合わせます(縦割・横割・係数処理ﾛｯﾄ数 ↔ 合紙・ＶＣ種別)。
+    相手に無い欄は空になります ── 板のCSVにコイルの縦割は置けません。
+    """
+    keep = len(SHARED_COLUMNS) + 1
+    out = [""] * len(target)
+    out[:keep] = (row + [""] * keep)[:keep]
+    for index in range(keep, len(target)):
+        name = target[index]
+        if name in source[keep:]:
+            out[index] = row[source.index(name, keep)]
+    return out
 
 
 def _take_grid_sheet(path: Path, grid: list[list[str]], result: SheetResult):
@@ -788,11 +868,12 @@ def _take_grid_sheet(path: Path, grid: list[list[str]], result: SheetResult):
     result.last_row = last_row_of(rows)
     taken: list[list[str]] = []
     previous_lot = ""
+    columns = columns_for(result.line)
     for number in range(FIRST_ROW, result.last_row + 1):
         values = rows.get(number, {})
         if not wanted(values):
             continue
-        line = [result.date] + [values.get(col, "") for _name, col in COLUMNS]
+        line = [result.date] + [values.get(col, "") for _name, col in columns]
         current = values.get("A", "")
         if current:
             previous_lot = current
@@ -841,14 +922,18 @@ def fill_by_lot(rows: list[list[str]], index: int) -> None:
             row[index] = first[row[LOT]]
 
 
-def _fill_all(rows: list[list[str]]) -> None:
-    """VBA と同じ順番で埋める。**並べ替えないでください。**"""
+def _fill_all(rows: list[list[str]], line: str = "") -> None:
+    """VBA と同じ順番で埋める。**並べ替えないでください。**
+
+    後ろ3列はラインで入れ替わるので、埋める相手もラインで決めます
+    (板は 合紙・ＶＣ種別 ── どちらもロットに付く値なので同じ埋め方)。
+    """
     for index in _FILL_DOWN:              # ①ロット№〜用途名を上詰め
         fill_down(rows, index)
     fill_by_lot(rows, _FILL_BY_LOT_TO)    # ②納入先はロット単位
     fill_down(rows, _FILL_DOWN_WORKERS)   # ③作業人数は上詰め(前のLotを見る)
-    for index in _FILL_BY_LOT:            # ④etc・包装仕様NO・縦割・横割・係数
-        fill_by_lot(rows, index)
+    for index in (_FILL_BY_LOT if is_coil(line) else _FILL_BY_LOT_SHEET):
+        fill_by_lot(rows, index)          # ④etc・包装仕様NO・(ラインの3列)
 
 
 # ------------------------------------------------------------------
@@ -939,8 +1024,8 @@ def build(paths, *, on_file=None, any_sheet: bool = False) -> Tally:
             on_file(path, index, len(paths), made)
     # **ラインごとに埋めます。** 上詰めもロット単位も「上の行」を見るので、
     # 混ぜたまま埋めると板の行に機側の値が入ります
-    for rows in tally.groups().values():
-        _fill_all(rows)
+    for line, rows in tally.groups().items():
+        _fill_all(rows, line)
     return tally
 
 
@@ -1009,26 +1094,30 @@ def write_csv(tally: Tally, out_dir) -> Path:
 def write_csvs(tally: Tally, out_dir) -> list[Path]:
     """**ラインごとに1本**書いて、その道を順に返す。
 
-    機側には板に無い欄(コイル縦割・横割・係数処理ﾛｯﾄ数)があり、板には
+    機側(コイル)には板に無い欄(縦割・横割・係数処理ﾛｯﾄ数)があり、板には
     機側に無い欄(合紙・ＶＣ種別)があります。1本にまとめると、どちらの行にも
-    相手の空の列が並びます ── **ラインで分けて出します**。
+    相手の空の列が並びます ── **ラインで分けて、並びも変えます**。
 
-    列の並びは**どのラインでも同じ23列**(VBAの集計シートのまま)です。
-    使わない欄が空になるだけで、様式は変えません。
+        コイル  日付 … 作業人数, 縦割, 横割, 係数処理ﾛｯﾄ数   (23列。VBAのまま)
+        板      日付 … 作業人数, 合紙, ＶＣ種別              (22列)
+
+    **先頭20列(日付＋共通19項目)はどちらも同じ位置**です。並べて見ても
+    ずれないようにするためで、違うのは後ろだけです。
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     groups = tally.groups()
-    return [_write_one(rows, out_dir / f"{file_stem(tally, line, rows)}.csv")
+    return [_write_one(rows, out_dir / f"{file_stem(tally, line, rows)}.csv",
+                       headers_for(line))
             for line, rows in groups.items()]
 
 
-def _write_one(rows: list, path: Path) -> Path:
+def _write_one(rows: list, path: Path, headers: tuple) -> Path:
     tmp = path.with_name(path.name + ".tmp")
     try:
         with open(tmp, "w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow(HEADERS)
+            writer.writerow(headers)
             writer.writerows(rows)
         os.replace(tmp, path)
     except PermissionError as exc:

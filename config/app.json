@@ -1,7 +1,7 @@
 {
   "app_id": "nlm.excel-csv-converter",
   "display_name": "エクセル → CSV 変換器",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "monitor_level": 2,
   "local_dir_name": "ExcelCsvConverter",
 
@@ -20,6 +20,10 @@
     "screen_timeout_seconds": 12,
     "job_poll_ms": 400,
     "idle_exit_minutes": 30
+  },
+
+  "lines": {
+    "coil": ["LS"]
   },
 
   "defaults": {
