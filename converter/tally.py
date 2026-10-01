@@ -306,6 +306,24 @@ def stop_frame(sheet) -> str:
     return ""
 
 
+#: 拾わなかった訳の種類。**数えるときに、名前の条件と様式の違いを混ぜない**
+WHY_NAME = "name"      # シート名に `_機側` が無い(ほかのライン。VBAと同じ)
+WHY_MARK = "mark"      # A1 が「集計」でない
+WHY_FRAME = "frame"    # 停止2枠のテンプレート
+WHY_LAYOUT = "layout"  # 見出しがどこか違う
+
+
+def why_kind(sheet, *, any_sheet: bool = False) -> str:
+    """`why_skipped` の理由を、**種類**で返す(空なら拾えます)。"""
+    if not any_sheet and NAME_MARK not in sheet.name:
+        return WHY_NAME
+    if sheet.cell(MARK_CELL) != MARK_VALUE:
+        return WHY_MARK
+    if stop_frame(sheet) == FRAME_TWO:
+        return WHY_FRAME
+    return WHY_LAYOUT if layout_problem(sheet) else ""
+
+
 def why_skipped(sheet, *, any_sheet: bool = False) -> str:
     """このシートを拾わない理由。**空なら拾えます。**
 
@@ -351,6 +369,8 @@ def check_sheet(sheet, *, file_name: str = "", any_sheet: bool = False) -> dict:
     return {"file": file_name, "sheet": sheet.name,
             "mark": sheet.cell(MARK_CELL), "frame": stop_frame(sheet),
             "ok": not why, "why": why or (EMPTY_NOTE if not found else ""),
+            "kind": why_kind(sheet, any_sheet=any_sheet),
+            "line": line_name(sheet_line(sheet.name)),
             "empty": not why and not found,
             "last_row": last_row_of(rows), "rows": found}
 
@@ -361,7 +381,8 @@ def check_book(path, *, any_sheet: bool = False) -> list[dict]:
         sheets = read_sheets(Path(path))
     except (NotXlsx, OSError) as exc:
         return [{"file": Path(path).name, "sheet": "", "mark": "", "frame": "",
-                 "ok": False, "why": str(exc), "last_row": 0, "rows": 0}]
+                 "ok": False, "why": str(exc), "kind": "broken", "line": "",
+                 "last_row": 0, "rows": 0}]
     return [check_sheet(sheet, file_name=Path(path).name, any_sheet=any_sheet)
             for sheet in sheets]
 

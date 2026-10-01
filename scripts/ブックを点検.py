@@ -66,7 +66,8 @@ def main(argv: list[str]) -> int:
     print("読める 枠    行数  ファイル / シート")
     print("─" * 78)
 
-    counts = {"ok": 0, "empty": 0, "three_bad": 0, "two": 0, "other": 0}
+    counts = {"ok": 0, "empty": 0, "three_bad": 0, "two": 0,
+              "other_line": 0, "other": 0}
     for book in books:
         for one in tally.check_book(book, any_sheet=any_sheet):
             frame = one["frame"] or "―"
@@ -74,13 +75,18 @@ def main(argv: list[str]) -> int:
                 counts["empty"] += 1           # 読めるが1行も拾えない
             elif one["ok"]:
                 counts["ok"] += 1
+            elif one.get("kind") == tally.WHY_NAME:
+                # **ほかのラインのシート。** 様式の問題ではないので別に数えます
+                # (VBAも同じ条件で外します ──「3枠なのに読めない」ではない)
+                counts["other_line"] += 1
             elif frame == tally.FRAME_TWO:
                 counts["two"] += 1
             elif frame == tally.FRAME_THREE:
                 counts["three_bad"] += 1       # **これが探しているもの**
             else:
                 counts["other"] += 1
-            if not (show_all or not one["ok"] or one.get("empty")
+            if not (show_all or one.get("empty")
+                    or (not one["ok"] and one.get("kind") != tally.WHY_NAME)
                     or frame == tally.FRAME_THREE):
                 continue
             where = f"{one['file']}" + (f" / {one['sheet']}" if one["sheet"] else "")
@@ -93,6 +99,8 @@ def main(argv: list[str]) -> int:
     print(f"読めるシート          : {counts['ok']}")
     print(f"読めるが0行           : {counts['empty']}")
     print(f"停止2枠(今後は無い)   : {counts['two']}")
+    print(f"機側以外のライン      : {counts['other_line']}"
+          + ("" if any_sheet else "  (--any-sheet で読めます)"))
     print(f"その他(対象外のシート): {counts['other']}")
     print(f"**停止3枠なのに読めない: {counts['three_bad']}**")
     if counts["three_bad"]:

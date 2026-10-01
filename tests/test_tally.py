@@ -229,6 +229,27 @@ class 点検(Base):
         self.assertFalse(found[0]["ok"])
         self.assertEqual(found[0]["frame"], tally.FRAME_TWO)
 
+    def test_外れた訳を種類で返す(self) -> None:
+        """**数えるときに、名前の条件と様式の違いを混ぜないため。**
+
+        ほかのラインのシートは「3枠なのに読めない」ではありません ──
+        VBAも同じ条件で外すので、様式の問題ではないからです。
+        """
+        hvc = self.book({8: {"D": "L1", "L": "9"}}, file="hvc.xlsx",
+                        name="2026年8月23日_HVC")
+        self.assertEqual(tally.check_book(hvc)[0]["kind"], tally.WHY_NAME)
+        self.assertEqual(tally.check_book(hvc, any_sheet=True)[0]["kind"], "")
+
+        mark = self.book({8: {"D": "L1", "L": "9"}}, file="mark.xlsx", A1="日報")
+        self.assertEqual(tally.check_book(mark)[0]["kind"], tally.WHY_MARK)
+
+        self.assertEqual(tally.check_book(self.two_slot_book())[0]["kind"],
+                         tally.WHY_FRAME)
+
+        layout = self.book({8: {"D": "L1", "L": "9"}}, file="layout.xlsx",
+                           AG7="お届け先")
+        self.assertEqual(tally.check_book(layout)[0]["kind"], tally.WHY_LAYOUT)
+
     def test_読めるが0行ならそう言う(self) -> None:
         """**「読めた」と「拾えた」は別です。** ○ で0行は言っておきます。"""
         path = self.book({8: {"D": "L1", "W": "段取り", "X": "20"}})
