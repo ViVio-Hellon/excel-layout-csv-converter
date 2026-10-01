@@ -186,7 +186,7 @@
     <section class="card">
       <div class="card-head">
         <h2>機側データ集計</h2>
-        <p>VBAと同じ拾い方・同じ並びで、読ませたぶん<b>全部を1本のCSV</b>に
+        <p>VBAと同じ拾い方・同じ並びで、読ませたぶんを<b>ラインごとに1本のCSV</b>へ
            転記します。<b>変換(4本組のCSV)はしません。</b>
            対象は停止3枠のブックで、シート名に <code>_機側</code> を含むものだけです。</p>
       </div>
@@ -195,7 +195,23 @@
         <button class="primary big" id="tally-start">集計する</button>
         <label class="check"><input type="checkbox" id="tally_dry_run">
           確かめるだけ(CSVを書きません)</label>
+        <label class="check"><input type="checkbox" id="tally_any_sheet">
+          機側以外のシートも読む</label>
         <span class="msg">出す先は設定部の「出力先フォルダ」です。</span>
+      </div>
+
+      <div class="notice">
+        <b>VBAは機側のシートだけを見ます</b>
+        (<code>A1が「集計」 かつ シート名に _機側 を含む</code>)── マクロが機側
+        ライン用に作られたためで、紙の様式はほかのラインでも同じです。
+        <b>「機側以外のシートも読む」</b>を入れると、A1が「集計」で停止3枠なら
+        シート名を問わずに読みます。<b>入れた時点でVBAと同じ結果ではなくなる</b>ので、
+        使ったことは結果に書きます。<br>
+        出すCSVは<b>ラインごとに1本</b>です
+        (<code>機側データ集計_LS_2026.08.23.csv</code> /
+         <code>機側データ集計_HVC_…</code>)── 機側には板に無い欄があり、
+        混ぜると空の列が並ぶためです。列の並びは<b>どのラインでも同じ23列</b>
+        (VBAの集計シートのまま)で、使わない欄が空になるだけです。
       </div>
 
       <div class="notice">

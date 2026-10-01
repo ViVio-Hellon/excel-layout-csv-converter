@@ -4,7 +4,7 @@ r"""ブックが**機側データ集計で読めるか**を、拾う前に見る
 探しているのは「**停止3枠なのに読めないブック**」です。2枠のブックは今後
 出てこない(3枠に統一される)ので、そちらは数えるだけにします。
 
-    python scripts/ブックを点検.py <フォルダ or ブック…> [--all]
+    python scripts/ブックを点検.py <フォルダ or ブック…> [--all] [--any-sheet]
 
 1シートにつき1行:
 
@@ -16,6 +16,11 @@ r"""ブックが**機側データ集計で読めるか**を、拾う前に見る
 最後に数をまとめます。**気にしてほしいのは「3枠なのに読めない」の数**です
 (0ならそのまま集計できます)。既定では読めないものと3枠のものだけ並べます。
 `--all` で全部出します。
+
+`--any-sheet` を付けると、**シート名の `_機側` を問わずに**見ます ── VBAは
+機側のシートだけを見るので(`InStr(ws.Name, "_機側") > 0`)、ほかのラインを
+読むとVBAと同じ結果ではなくなります。「様式は同じだから読めるか?」を
+確かめるときに使ってください。
 """
 from __future__ import annotations
 
@@ -49,18 +54,21 @@ def main(argv: list[str]) -> int:
     from converter import tally
 
     show_all = "--all" in argv
+    any_sheet = "--any-sheet" in argv
     books = gather([a for a in argv if not a.startswith("--")])
     if not books:
         print(__doc__)
         return 2
 
-    print(f"{len(books)} 冊を見ます\n")
+    print(f"{len(books)} 冊を見ます"
+          + ("(シート名の「_機側」は問いません ── VBAは機側だけ見ます)"
+             if any_sheet else "") + "\n")
     print("読める 枠    行数  ファイル / シート")
     print("─" * 78)
 
     counts = {"ok": 0, "empty": 0, "three_bad": 0, "two": 0, "other": 0}
     for book in books:
-        for one in tally.check_book(book):
+        for one in tally.check_book(book, any_sheet=any_sheet):
             frame = one["frame"] or "―"
             if one.get("empty"):
                 counts["empty"] += 1           # 読めるが1行も拾えない

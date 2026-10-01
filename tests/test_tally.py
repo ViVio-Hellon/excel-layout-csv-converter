@@ -156,6 +156,38 @@ class 対象シート(Base):
         self.assertEqual(found.rows, [])
         self.assertIn("集計表(旧)", found.sheets[0].skipped)
 
+    def test_機側以外も読ませられる(self) -> None:
+        """**頼まれたときだけ**、シート名の縛りを外します。
+
+        VBAは `InStr(ws.Name, "_機側") > 0` で機側のシートしか見ません
+        (マクロが機側ライン用に作られたため)。紙の様式は同じなので座標は
+        ほかのラインでも合いますが、**外すとVBAと同じ結果ではなくなる**ので、
+        既定は切ったまま、使ったことを結果に書きます。
+        """
+        path = self.book({8: {"D": "L1", "L": "9"}}, name="2026年8月23日_HVC")
+        found = tally.build([path], any_sheet=True)
+        self.assertEqual(len(found.rows), 1, found.sheets[0].skipped)
+        self.assertEqual(found.rows[0][tally.LOT], "L1")
+        self.assertIn("機側以外のシートも読みました", found.summary())
+
+    def test_機側以外ばかりならそう言い添える(self) -> None:
+        """**0行で終わったときに、何をすればよいかまで出します。**"""
+        path = self.book({8: {"D": "L1", "L": "9"}}, name="2026年8月23日_HVC")
+        found = tally.build([path])
+        self.assertEqual(found.rows, [])
+        self.assertIn("機側以外のシートも読む", found.summary())
+
+    def test_機側以外も読んでもA1と見出しは見る(self) -> None:
+        """**緩めるのはシート名だけ。** 別の様式を黙って読みません。"""
+        path = self.book({8: {"D": "L1", "L": "9"}}, name="2026年8月23日_HVC",
+                         A1="日報")
+        found = tally.build([path], any_sheet=True)
+        self.assertEqual(found.rows, [])
+        self.assertIn("A1が「集計」ではありません", found.sheets[0].skipped)
+        two = tally.build([self.two_slot_book()], any_sheet=True)
+        self.assertEqual(two.rows, [])
+        self.assertIn("停止2枠", two.sheets[0].skipped)
+
     def test_停止2枠のブックは断る(self) -> None:
         """**黙って読みません。** 列が2つずれていて、別の値が入ります。"""
         path = self.book({8: {"D": "L1", "L": "9"}},
@@ -186,6 +218,11 @@ class 点検(Base):
         self.assertTrue(found[0]["ok"], found[0]["why"])
         self.assertEqual(found[0]["frame"], tally.FRAME_THREE)
         self.assertEqual(found[0]["rows"], 2)
+
+    def test_機側以外も見られる(self) -> None:
+        path = self.book({8: {"D": "L1", "L": "9"}}, name="2026年8月23日_HVC")
+        self.assertFalse(tally.check_book(path)[0]["ok"])
+        self.assertTrue(tally.check_book(path, any_sheet=True)[0]["ok"])
 
     def test_2枠は2枠と言う(self) -> None:
         found = tally.check_book(self.two_slot_book())
@@ -533,6 +570,71 @@ class 変換が出したCSVを読む(Base):
         self.assertEqual(tally.csv_kind(["あ", "い"]), "")
 
 
+class ライン別に分ける(Base):
+    """**機側には板に無い欄があるので、ラインで分けて出します。**
+
+    紙の様式(座標)はどのラインでも同じなので、拾い方は同じです。
+    混ぜたまま埋めると、板の行が機側の値を引き継ぎます ── 空欄の埋め方は
+    「上の行」を見るためで、ここが分ける一番の理由です。
+    """
+
+    def test_ラインごとに1本ずつ出す(self) -> None:
+        ls = self.book({8: {"D": "L1", "L": "9"}}, file="ls.xlsx",
+                       name="2026年8月23日_機側")
+        hvc = self.book({8: {"D": "H1", "L": "9"}}, file="hvc.xlsx",
+                        name="2026年8月23日_HVC")
+        found = tally.build([ls, hvc], any_sheet=True)
+        made = tally.write_csvs(found, self.tmp / "out")
+        self.assertEqual([p.name for p in made],
+                         ["機側データ集計_LS_2026.08.23.csv",
+                          "機側データ集計_HVC_2026.08.23.csv"])
+        for path, lot in zip(made, ("L1", "H1")):
+            rows = list(csv.reader(
+                path.read_text(encoding="utf-8-sig").splitlines()))
+            self.assertEqual(len(rows), 2)        # 見出し + 1行
+            self.assertEqual(rows[1][tally.LOT], lot)
+
+    def test_列の並びはどのラインでも同じ(self) -> None:
+        """**様式は変えません。** 使わない欄が空になるだけです。"""
+        hvc = self.book({8: {"D": "H1", "L": "9"}}, name="2026年8月23日_HVC")
+        found = tally.build([hvc], any_sheet=True)
+        made = tally.write_csvs(found, self.tmp / "out")[0]
+        head = made.read_text(encoding="utf-8-sig").splitlines()[0]
+        self.assertEqual(head.lstrip("\ufeff").split(","), list(tally.HEADERS))
+
+    def test_ラインをまたいで埋めない(self) -> None:
+        """**ここが分ける一番の理由です。**
+
+        上詰めは「上の行」を見るので、混ぜたままだと板の1行目に機側の
+        ロット№や用途名が入ります。
+        """
+        ls = self.book({8: {"D": "L1", "L": "9", "AF": "用途あ"}},
+                       file="ls.xlsx", name="2026年8月23日_機側")
+        hvc = self.book({8: {"L": "9"}}, file="hvc.xlsx",
+                        name="2026年8月23日_HVC")    # ロット№も用途名も空
+        found = tally.build([ls, hvc], any_sheet=True)
+        groups = found.groups()
+        self.assertEqual(groups["LS"][0][tally.LOT], "L1")
+        self.assertEqual(groups["HVC"][0][tally.LOT], "")
+        use = list(tally.HEADERS).index("用途名")
+        self.assertEqual(groups["HVC"][0][use], "")
+
+    def test_機側だけなら1本のまま(self) -> None:
+        found = tally.build([self.book({8: {"D": "L1", "L": "9"}})])
+        made = tally.write_csvs(found, self.tmp / "out")
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0].name, "機側データ集計_LS_2026.08.23.csv")
+
+    def test_前に出した集計は名前からラインを拾う(self) -> None:
+        """23列のままなので、**ラインは名前に入れてあります**。"""
+        first = tally.build([self.book({8: {"D": "L1", "L": "9"}})])
+        made = tally.write_csvs(first, self.tmp / "out")[0]
+        again = tally.build([made])
+        self.assertEqual(again.sheets[0].line, "LS")
+        self.assertEqual(tally.write_csvs(again, self.tmp / "again")[0].name,
+                         made.name)
+
+
 class 書き出し(Base):
     def test_見出しは23列でVBAと同じ(self) -> None:
         self.assertEqual(len(tally.HEADERS), 23)
@@ -579,12 +681,15 @@ class 書き出し(Base):
         second = self.book({8: {"D": "L2", "L": "9"}}, file="2.xlsx",
                            name="2026年8月27日_機側")
         found = tally.build([first, second])
-        self.assertEqual(tally.file_stem(found),
-                         "機側データ集計_2026.08.23-2026.08.27")
+        made = tally.write_csvs(found, self.tmp / "out")
+        self.assertEqual([p.name for p in made],
+                         ["機側データ集計_LS_2026.08.23-2026.08.27.csv"])
 
     def test_1日だけなら日付は1つ(self) -> None:
         found = tally.build([self.book({8: {"D": "L1", "L": "9"}})])
-        self.assertEqual(tally.file_stem(found), "機側データ集計_2026.08.23")
+        made = tally.write_csvs(found, self.tmp / "out")
+        self.assertEqual([p.name for p in made],
+                         ["機側データ集計_LS_2026.08.23.csv"])
 
 
 class 既存の変換と混ぜない(Base):

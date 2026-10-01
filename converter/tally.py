@@ -105,6 +105,8 @@ class SheetResult:
     file: str = ""
     sheet: str = ""
     date: str = ""
+    #: どのラインのものか(シート名の「_」より後、など)。**分けて出すため**
+    line: str = ""
     rows: int = 0
     last_row: int = 0
     skipped: str = ""          # 拾わなかった理由(空なら拾った)
@@ -122,8 +124,28 @@ class Tally:
     """積み上げた表ぜんぶ。"""
 
     rows: list[list[str]] = field(default_factory=list)
+    #: `rows` と同じ長さの、行ごとのライン。**CSVには出しません**
+    #: (VBAの23列のままにするため)。分けて出すのと、空欄の埋め方に使います
+    lines: list[str] = field(default_factory=list)
     sheets: list[SheetResult] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)   # (ファイル名, 理由)
+    #: シート名の `_機側` を問わずに読んだか。**VBAと違う読み方をしたしるし**
+    any_sheet: bool = False
+
+    def groups(self) -> dict:
+        """ライン → その行だけ(出てきた順)。**行そのものを渡します**
+        (list は参照なので、ここに入れたまま埋めれば元にも効きます)。
+        """
+        found: dict[str, list[list[str]]] = {}
+        for index, row in enumerate(self.rows):
+            line = self.lines[index] if index < len(self.lines) else ""
+            found.setdefault(line, []).append(row)
+        return found
+
+    def add(self, rows: list, line: str) -> None:
+        """拾った行を、ライン付きで積む。"""
+        self.rows.extend(rows)
+        self.lines.extend([line] * len(rows))
 
     @property
     def taken(self) -> list[SheetResult]:
@@ -160,8 +182,22 @@ class Tally:
                 + (f"({span})" if span else "") + self._tail())
 
     def _tail(self) -> str:
-        notes = self.notes
+        notes = list(self.notes)
+        if self.any_sheet:
+            # **黙って広げません。** VBAは機側のシートだけを見ます
+            notes.insert(0, "機側以外のシートも読みました"
+                            "(VBAは名前に「_機側」を含むシートだけ見ます)")
+        if not self.rows and self.name_skipped:
+            # **1行も拾えなかったときだけ**言います ── 拾えているのに
+            # 「機側以外ばかりでした」と出ると、何が起きたのか分かりません
+            notes.append("機側以外のシートばかりでした ──「機側以外のシートも"
+                         "読む」を入れると、同じ様式なら読めます")
         return ("。" + "。".join(notes)) if notes else ""
+
+    @property
+    def name_skipped(self) -> bool:
+        """シート名の条件だけで外れたものがあるか(言い添えるため)。"""
+        return any(NAME_MARK in one.skipped for one in self.sheets)
 
 
 _DATE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
@@ -207,6 +243,34 @@ def sheet_date(sheet_name: str) -> str:
     return sheet_name.split("_")[0]
 
 
+def sheet_line(sheet_name: str) -> str:
+    """ラインの呼び名。**シート名の「_」より後**(`2026年8月23日_機側` → `機側`)。
+
+    VBAは日付しか使いません(機側しか見ないので要らなかった)。ほかのラインも
+    読むときは、**どのラインの行かが分からないと混ざります** ── 空欄の
+    埋め方は上の行を見るので、板の行が機側の値を引き継いでしまいます。
+    """
+    _date, _, rest = sheet_name.partition("_")
+    return rest.strip()
+
+
+def line_name(text: str) -> str:
+    """現場の呼び名 → ツールのライン名(`機側` → `LS`)。**当たらなければそのまま。**
+
+    日報管理ツールの当て方をそのまま借ります ── 同じラインの行が、
+    ブックからは「機側」、変換したCSVからは「LS」として別々に分かれて
+    しまわないように。
+    """
+    folded = (text or "").strip()
+    if not folded:
+        return ""
+    try:
+        from nippou.logic import nippou_sheet
+        return nippou_sheet.guess_line(folded) or folded
+    except Exception:                             # noqa: BLE001 - 名前はそのまま
+        return folded
+
+
 def layout_problem(sheet) -> str:
     """見出しが停止3枠の並びか。違えば理由を返します(空なら合っている)。"""
     for ref, expected in CHECK_CELLS:
@@ -242,15 +306,22 @@ def stop_frame(sheet) -> str:
     return ""
 
 
-def why_skipped(sheet) -> str:
+def why_skipped(sheet, *, any_sheet: bool = False) -> str:
     """このシートを拾わない理由。**空なら拾えます。**
 
     条件を1つずつ見て、**どれで外れたのかと、実際の値**を言います ──
     「対象外」とだけ出ていると、直しようがありません。
+
+    `any_sheet` は**シート名の縛りだけ**を外します(頼まれたときだけ)。
+    VBAは `InStr(ws.Name, "_機側") > 0` で機側のシートしか見ません ──
+    マクロが機側ライン用に作られたものだからです。紙の様式は同じなので、
+    座標はほかのラインでもそのまま合いますが、**外すとVBAと同じ結果では
+    なくなります**。だから既定は切ってあり、使ったことは結果に書きます。
     """
-    if NAME_MARK not in sheet.name:
+    if not any_sheet and NAME_MARK not in sheet.name:
         return (f"シート名に「{NAME_MARK}」がありません(名前: 「{sheet.name}」)。"
-                "VBAも同じ条件でシートを選びます")
+                "VBAも同じ条件でシートを選びます"
+                "(ほかのラインも読むなら「機側以外のシートも読む」)")
     mark = sheet.cell(MARK_CELL)
     if mark != MARK_VALUE:
         return (f"{MARK_CELL}が「{MARK_VALUE}」ではありません"
@@ -272,9 +343,9 @@ def count_rows(rows: dict) -> int:
                if wanted(rows.get(number, {})))
 
 
-def check_sheet(sheet, *, file_name: str = "") -> dict:
+def check_sheet(sheet, *, file_name: str = "", any_sheet: bool = False) -> dict:
     """1枚ぶんの**点検結果**。読む相手を探すときに使います(拾いません)。"""
-    why = why_skipped(sheet)
+    why = why_skipped(sheet, any_sheet=any_sheet)
     rows = sheet.rows
     found = count_rows(rows)
     return {"file": file_name, "sheet": sheet.name,
@@ -284,21 +355,24 @@ def check_sheet(sheet, *, file_name: str = "") -> dict:
             "last_row": last_row_of(rows), "rows": found}
 
 
-def check_book(path) -> list[dict]:
+def check_book(path, *, any_sheet: bool = False) -> list[dict]:
     """ブック1冊の全シートを点検する。読めなければ理由を1件返します。"""
     try:
         sheets = read_sheets(Path(path))
     except (NotXlsx, OSError) as exc:
         return [{"file": Path(path).name, "sheet": "", "mark": "", "frame": "",
                  "ok": False, "why": str(exc), "last_row": 0, "rows": 0}]
-    return [check_sheet(sheet, file_name=Path(path).name) for sheet in sheets]
+    return [check_sheet(sheet, file_name=Path(path).name, any_sheet=any_sheet)
+            for sheet in sheets]
 
 
-def take_sheet(sheet, *, file_name: str = "") -> tuple[list[list[str]], SheetResult]:
+def take_sheet(sheet, *, file_name: str = "",
+               any_sheet: bool = False) -> tuple[list[list[str]], SheetResult]:
     """シート1枚から行を拾う。**VBAの転記そのまま。**"""
     result = SheetResult(file=file_name, sheet=sheet.name,
-                         date=sheet_date(sheet.name))
-    why = why_skipped(sheet)
+                         date=sheet_date(sheet.name),
+                         line=line_name(sheet_line(sheet.name)))
+    why = why_skipped(sheet, any_sheet=any_sheet)
     if why:
         result.skipped = why
         return [], result
@@ -565,6 +639,13 @@ def _take_detail_csv(grid: list[list[str]], result: SheetResult,
     result.kind = "CSV(集計明細)"
     stops = stops or {}
     head = grid[0]
+    if "ライン" in head:
+        # 1本は1日・1ラインぶんなので、**先頭の行のライン**で足ります
+        where = head.index("ライン")
+        for line in grid[1:]:
+            if len(line) > where and line[where].strip():
+                result.line = line_name(line[where].strip())
+                break
     at = {name: index for index, name in enumerate(head)}
     labels = detail_labels()
 
@@ -630,9 +711,26 @@ def _take_detail_csv(grid: list[list[str]], result: SheetResult,
     return taken, result
 
 
+#: 出すCSVの名前の頭。`機側データ集計_<ライン>_<日付>.csv`
+FILE_HEAD = "機側データ集計"
+
+
+def line_of_name(stem: str) -> str:
+    """`機側データ集計_LS_2026.08.23` → `LS`。読めなければ空。
+
+    前に出した集計CSVには**ラインの列がありません**(VBAの23列のまま)。
+    名前に入れてあるので、積み増すときはそこから拾います。
+    """
+    parts = stem.split("_")
+    if len(parts) >= 3 and parts[0] == FILE_HEAD:
+        return parts[1]
+    return ""
+
+
 def _take_tallied(grid: list[list[str]], result: SheetResult):
     """**前に出した集計**。そのまま積み増します(VBAの追記と同じ)。"""
     result.kind = "CSV(集計)"
+    result.line = line_name(line_of_name(Path(result.file).stem))
     width = len(HEADERS)
     rows: list[list[str]] = []
     for line in grid[1:]:
@@ -658,6 +756,8 @@ def _take_grid_sheet(path: Path, grid: list[list[str]], result: SheetResult):
     result.kind = "CSV(シート)"
     rows = grid_rows(grid)
     sheet = _Grid(path.name, rows)
+    # ラインは**梱包ラインの欄(E2)**から。シート名が無いので
+    result.line = line_name(sheet.cell("E2"))
     problem = layout_problem(sheet)
     if problem:
         result.skipped = problem
@@ -772,7 +872,7 @@ def master_names() -> dict:
         return {}
 
 
-def build(paths, *, on_file=None) -> Tally:
+def build(paths, *, on_file=None, any_sheet: bool = False) -> Tally:
     """ブックを順に読み、1枚の表にする。
 
     `paths` の順がそのまま**積む順**です(上詰めの補完は並び順で結果が
@@ -784,14 +884,18 @@ def build(paths, *, on_file=None) -> Tally:
     **CSVは先に1度のぞきます**(`_scan_csv`) ── 停止内訳CSVの内訳名を、
     集計明細CSVを読むときに使うためです。入れた順(ドラッグの順)に左右
     されないように、先に全部集めます。
+
+    `any_sheet` を立てると、**シート名の `_機側` を問いません**(A1が「集計」で
+    停止3枠なら読みます)。VBAは機側のシートだけを見るので、**立てた時点で
+    VBAと同じ結果ではなくなります** ── 使ったことは結果に書きます。
     """
-    tally = Tally()
+    tally = Tally(any_sheet=any_sheet)
     paths = [Path(p) for p in paths]
     grids, stops = _scan_csv(paths)
     for index, path in enumerate(paths, start=1):
         if path.suffix.lower() == ".csv":
             rows, result = take_csv(path, grid=grids.get(path), stops=stops)
-            tally.rows.extend(rows)
+            tally.add(rows, result.line)
             tally.sheets.append(result)
             if on_file:
                 on_file(path, index, len(paths), [result])
@@ -805,33 +909,61 @@ def build(paths, *, on_file=None) -> Tally:
             continue
         made: list[SheetResult] = []
         for sheet in sheets:
-            rows, result = take_sheet(sheet, file_name=path.name)
-            tally.rows.extend(rows)
+            rows, result = take_sheet(sheet, file_name=path.name,
+                                      any_sheet=any_sheet)
+            tally.add(rows, result.line)
             tally.sheets.append(result)
             made.append(result)
         if on_file:
             on_file(path, index, len(paths), made)
-    _fill_all(tally.rows)
+    # **ラインごとに埋めます。** 上詰めもロット単位も「上の行」を見るので、
+    # 混ぜたまま埋めると板の行に機側の値が入ります
+    for rows in tally.groups().values():
+        _fill_all(rows)
     return tally
 
 
 # ------------------------------------------------------------------
 # 書き出す
 # ------------------------------------------------------------------
-def file_stem(tally: Tally) -> str:
-    """出すCSVの名前。**日付の幅が名前で分かる**ようにします。"""
-    days = [_DATE.match(d) for d in tally.dates]
+def file_stem(tally: Tally, line: str = "", rows: list | None = None) -> str:
+    """出すCSVの名前。**ラインと日付の幅が名前で分かる**ようにします。
+
+        機側データ集計_LS_2026.08.23.csv
+        機側データ集計_HVC_2026.08.23-2026.08.27.csv
+        機側データ集計_2026.08.23.csv          ← ラインが分からないとき
+
+    ラインを名前に入れるのは、**ライン別に分けて出す**からです(機側には
+    板に無い欄があるので、1本にまとめると空の列が混ざります)。
+    """
+    found = tally.dates if rows is None else _dates_of(rows)
+    days = [_DATE.match(d) for d in found]
     stamps = [f"{m.group(1)}.{int(m.group(2)):02d}.{int(m.group(3)):02d}"
               for m in days if m]
-    if not stamps:
-        return "機側データ集計"
+    parts = [FILE_HEAD]
+    if line:
+        parts.append(line)
     if len(stamps) == 1:
-        return f"機側データ集計_{stamps[0]}"
-    return f"機側データ集計_{min(stamps)}-{max(stamps)}"
+        parts.append(stamps[0])
+    elif stamps:
+        parts.append(f"{min(stamps)}-{max(stamps)}")
+    return "_".join(parts)
+
+
+def _dates_of(rows: list) -> list[str]:
+    """その行たちに出てくる日付を、出てきた順に(重複なし)。"""
+    found: list[str] = []
+    for row in rows:
+        if row and row[0] and row[0] not in found:
+            found.append(row[0])
+    return found
 
 
 def write_csv(tally: Tally, out_dir) -> Path:
-    """CSVを1本書いて、その道を返す。
+    """**1本目**のCSVを書いて、その道を返す(ラインが1つのときの近道)。
+
+    中身は `write_csvs` と同じです ── 2ライン以上あるときは**全部書いて**
+    1本目を返すので、呼ぶ側が気づかずに取りこぼすことはありません。
 
     BOM付き UTF-8 ── Windows の Excel でそのまま開けます(既存のCSVと同じ)。
 
@@ -850,15 +982,33 @@ def write_csv(tally: Tally, out_dir) -> Path:
     無事のまま**なので、閉じてからやり直せます。そのことが分かる言葉で
     断ります。
     """
+    return write_csvs(tally, out_dir)[0]
+
+
+def write_csvs(tally: Tally, out_dir) -> list[Path]:
+    """**ラインごとに1本**書いて、その道を順に返す。
+
+    機側には板に無い欄(コイル縦割・横割・係数処理ﾛｯﾄ数)があり、板には
+    機側に無い欄(合紙・ＶＣ種別)があります。1本にまとめると、どちらの行にも
+    相手の空の列が並びます ── **ラインで分けて出します**。
+
+    列の並びは**どのラインでも同じ23列**(VBAの集計シートのまま)です。
+    使わない欄が空になるだけで、様式は変えません。
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{file_stem(tally)}.csv"
+    groups = tally.groups()
+    return [_write_one(rows, out_dir / f"{file_stem(tally, line, rows)}.csv")
+            for line, rows in groups.items()]
+
+
+def _write_one(rows: list, path: Path) -> Path:
     tmp = path.with_name(path.name + ".tmp")
     try:
         with open(tmp, "w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(HEADERS)
-            writer.writerows(tally.rows)
+            writer.writerows(rows)
         os.replace(tmp, path)
     except PermissionError as exc:
         raise PermissionError(

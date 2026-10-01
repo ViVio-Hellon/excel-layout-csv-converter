@@ -50,7 +50,9 @@ def _start_tally(payload: dict) -> Response:
                       status=400)
     sources = intake.get(intake.TALLY).files()
     try:
-        snapshot = jobs.RUNNER.start_tally(sources, settings, dry_run=dry_run)
+        snapshot = jobs.RUNNER.start_tally(
+            sources, settings, dry_run=dry_run,
+            any_sheet=bool(payload.get("any_sheet", False)))
     except (ValueError, RuntimeError) as exc:
         return refuse("始められません", str(exc), status=400)
     return json_response({"ok": True, "job": snapshot})

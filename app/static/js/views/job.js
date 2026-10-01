@@ -67,7 +67,7 @@ export function render(job) {
     toast.notice(job.state + " ── " + (job.message || "")
                  + (job.error ? " / " + job.error : "")
                  + (job.dry_run || !job.out_dir ? "" : "\n出力先: " + job.out_dir)
-                 + (job.tally_path ? "\n機側データ集計: " + job.tally_path : ""),
+                 + tallyPaths(job),
                  kind);
     if (job.id !== lastId) {
       lastId = job.id;
@@ -144,6 +144,15 @@ function renderResult(job, tally) {
   });
 }
 
+// 出した集計CSVの道。**ラインごとに1本**出るので、全部並べます
+// (機側には板に無い欄があるので分けています)
+function tallyPaths(job) {
+  const made = (job.tally_paths && job.tally_paths.length)
+    ? job.tally_paths : (job.tally_path ? [job.tally_path] : []);
+  if (!made.length) { return ""; }
+  return "\n機側データ集計: " + made.join("\n" + " ".repeat(14));
+}
+
 // 詳細欄。**読むときに手を入れたこと(note)は必ず出します** ──
 // 作業日の書き方を直した、など。黙って直したことにしません
 function detail(file) {
@@ -178,7 +187,8 @@ export function wire() {
     dry_run: $("dry_run").checked,
   }));
   $("tally-start").addEventListener("click", () => begin({
-    tab: "tally", dry_run: $("tally_dry_run").checked }));
+    tab: "tally", dry_run: $("tally_dry_run").checked,
+    any_sheet: $("tally_any_sheet").checked }));
   $("cancel").addEventListener("click", cancel);
   // 閉じているあいだに走っていた仕事があれば、そのまま引き継ぐ
   return api("/api/job").then((result) => {

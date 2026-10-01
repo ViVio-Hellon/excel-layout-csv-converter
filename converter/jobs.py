@@ -109,8 +109,12 @@ class Job:
     master_ok: bool = False
     #: 機側データ集計(VBAと同じ転記)。頼まれたときだけ動きます
     tally: bool = False
+    #: シート名の `_機側` を問わずに読む。**VBAと違う読み方をするしるし**
+    any_sheet: bool = False
     tally_rows: int = 0
     tally_path: str = ""
+    #: ライン別に出したCSV。**機側と板は分けて出します**
+    tally_paths: list[str] = field(default_factory=list)
     tally_message: str = ""
 
     # -- 数えかた ---------------------------------------------------
@@ -167,6 +171,8 @@ class Job:
             "tally": self.tally,
             "tally_rows": self.tally_rows,
             "tally_path": self.tally_path,
+            "tally_paths": list(self.tally_paths),
+            "any_sheet": self.any_sheet,
             "tally_message": self.tally_message,
             "files": [dict(asdict(f), mark=f.mark) for f in self.files],
             "counts": {
@@ -249,12 +255,14 @@ class Runner:
 
     def start_tally(self, sources: list[Path],
                     settings: user_settings.Settings,
-                    *, dry_run: bool = False) -> dict:
+                    *, dry_run: bool = False, any_sheet: bool = False) -> dict:
         """機側データ集計だけを走らせる(変換はしません)。
 
         タブで分けてあるので、**集計だけ欲しいときに4本組CSVは出ません**。
         `dry_run` なら**CSVを1本も書きません** ── 読める相手かどうかと、
         何行拾えるかだけ見ます(「停止3枠なのに読めないブック」探しに使います)。
+        `any_sheet` は**シート名の `_機側` を問わない**ようにします ──
+        VBAは機側のシートだけを見るので、既定は切ってあります。
         受けるのはブック(.xlsx / .xlsm)と、前に出した集計CSV、シートを
         CSVで保存したものです(`converter/tally.py`)。
         """
@@ -275,7 +283,8 @@ class Runner:
             self.job = Job(id=uuid.uuid4().hex[:12], kind=KIND_TALLY,
                            state=RUNNING, phase=PHASE_TALLY,
                            total=len(sources), out_dir=out_dir, tally=True,
-                           dry_run=dry_run, started_at=time.time())
+                           dry_run=dry_run, any_sheet=any_sheet,
+                           started_at=time.time())
             job = self.job
         log.info("機側データ集計 開始 id=%s %d本 → %s", job.id, job.total, out_dir)
         self._thread = threading.Thread(
@@ -379,14 +388,17 @@ class Runner:
                 job.current = path.name
 
         try:
-            found = tally_mod.build(sources, on_file=on_file)
-            path = (tally_mod.write_csv(found, job.out_dir)
-                    if found.rows and not job.dry_run else None)
+            found = tally_mod.build(sources, on_file=on_file,
+                                    any_sheet=job.any_sheet)
+            made = (tally_mod.write_csvs(found, job.out_dir)
+                    if found.rows and not job.dry_run else [])
+            path = made[0] if made else None
             with self._lock:
                 job.tally_rows = len(found.rows)
                 job.tally_path = str(path) if path else ""
+                job.tally_paths = [str(one) for one in made]
                 job.tally_message = found.summary()
-                job.written = 1 if path else 0
+                job.written = len(made)
                 job.state = DONE
                 job.phase = PHASE_END
                 job.message = found.summary() + (
@@ -435,9 +447,10 @@ class Runner:
                 job.tally_rows = len(found.rows)
                 job.tally_message = found.summary()
             if not dry_run and found.rows:
-                path = tally_mod.write_csv(found, job.out_dir)
+                made = tally_mod.write_csvs(found, job.out_dir)
                 with self._lock:
-                    job.tally_path = str(path)
+                    job.tally_path = str(made[0]) if made else ""
+                    job.tally_paths = [str(one) for one in made]
             skipped = [s for s in found.sheets if not s.taken]
             if skipped:
                 log.info("機側データ集計: 拾わなかったシート %d 枚(%s)",

@@ -99,6 +99,9 @@ def main(argv=None) -> int:
                              "読みます**(分類ごと)")
     parser.add_argument("--tally", action="store_true",
                         help="機側データ集計も出します(VBAと同じ転記を1本のCSVに)")
+    parser.add_argument("--any-sheet", action="store_true", dest="any_sheet",
+                        help="集計で、シート名の「_機側」を問わない。"
+                             "**VBAは機側のシートだけ見ます**(既定は同じ)")
     parser.add_argument("--check", action="store_true",
                         help="CSVを書かずに、読めるか・数が合うかだけ見ます")
     parser.add_argument("--quiet", action="store_true",
@@ -149,7 +152,7 @@ def main(argv=None) -> int:
         from converter import tally
 
         books = run.gather(args.inputs)
-        table = tally.build(books)
+        table = tally.build(books, any_sheet=args.any_sheet)
         print()
         print(f"機側データ集計: {table.summary()}")
         for one in table.sheets:
@@ -158,7 +161,9 @@ def main(argv=None) -> int:
         for name, why in table.errors:
             print(f"   読めませんでした {name}: {why}")
         if table.rows and not args.check:
-            print(f"   → {tally.write_csv(table, args.out)}")
+            # **ラインごとに1本**出ます(機側には板に無い欄があるので)
+            for made in tally.write_csvs(table, args.out):
+                print(f"   → {made}")
 
     print()
     print(f"読めた        : {len(found.read_ok)}/{len(found.files)} 本")
