@@ -248,10 +248,13 @@ class Runner:
         return self.snapshot()
 
     def start_tally(self, sources: list[Path],
-                    settings: user_settings.Settings) -> dict:
+                    settings: user_settings.Settings,
+                    *, dry_run: bool = False) -> dict:
         """機側データ集計だけを走らせる(変換はしません)。
 
         タブで分けてあるので、**集計だけ欲しいときに4本組CSVは出ません**。
+        `dry_run` なら**CSVを1本も書きません** ── 読める相手かどうかと、
+        何行拾えるかだけ見ます(「停止3枠なのに読めないブック」探しに使います)。
         受けるのはブック(.xlsx / .xlsm)と、前に出した集計CSV、シートを
         CSVで保存したものです(`converter/tally.py`)。
         """
@@ -265,12 +268,14 @@ class Runner:
                 raise ValueError(
                     f"一度に読めるのは {limit} 本までです(いまは {len(sources)} 本)。"
                     "分けて実行してください")
-            out_dir = str(user_settings.ensure_output(settings))
+            # **確かめるだけなら、出力先は作りません**(書かないので)
+            out_dir = ("" if dry_run
+                       else str(user_settings.ensure_output(settings)))
             self._cancel.clear()
             self.job = Job(id=uuid.uuid4().hex[:12], kind=KIND_TALLY,
                            state=RUNNING, phase=PHASE_TALLY,
                            total=len(sources), out_dir=out_dir, tally=True,
-                           started_at=time.time())
+                           dry_run=dry_run, started_at=time.time())
             job = self.job
         log.info("機側データ集計 開始 id=%s %d本 → %s", job.id, job.total, out_dir)
         self._thread = threading.Thread(
@@ -354,24 +359,29 @@ class Runner:
         """集計だけの仕事。1本ずつ読みながら進み具合を出します。"""
         from . import tally as tally_mod
 
-        def on_file(path, index, total, result):
+        def on_file(path, index, total, results):
+            """**1枚につき1行**出します(1冊に何枚も入っていることがある)。"""
             if self._cancel.is_set():
                 raise Cancelled()
-            row = FileRow(name=path.name, ok=bool(result and result.taken),
-                          report_date=(result.date if result else ""),
-                          rows=(result.rows if result else 0),
-                          error=(result.skipped if result else "読めませんでした"),
-                          note=(result.note if result else ""),
-                          verify=(result.kind if result else ""),
-                          verify_ok=bool(result and result.taken))
+            rows = [FileRow(name=(f"{path.name} / {one.sheet}"
+                                  if one.sheet and one.sheet != path.name
+                                  else path.name),
+                            ok=bool(one.taken), report_date=one.date,
+                            rows=one.rows, error=one.skipped, note=one.note,
+                            verify=one.kind, verify_ok=bool(one.taken))
+                    for one in (results or [])]
+            # **空のときは何も足しません。** 開けなかったブックは
+            # `tally.errors` として、本当の理由つきで最後に並びます
+            # (足すと同じファイルが2行に出ます)
             with self._lock:
-                job.files.append(row)
+                job.files.extend(rows)
                 job.done = index
                 job.current = path.name
 
         try:
             found = tally_mod.build(sources, on_file=on_file)
-            path = tally_mod.write_csv(found, job.out_dir) if found.rows else None
+            path = (tally_mod.write_csv(found, job.out_dir)
+                    if found.rows and not job.dry_run else None)
             with self._lock:
                 job.tally_rows = len(found.rows)
                 job.tally_path = str(path) if path else ""
@@ -380,7 +390,9 @@ class Runner:
                 job.state = DONE
                 job.phase = PHASE_END
                 job.message = found.summary() + (
-                    "" if path else " ── CSVは書いていません")
+                    "" if path else
+                    (" ── 確かめるだけなのでCSVは書いていません" if job.dry_run
+                     else " ── CSVは書いていません"))
             for name, why in found.errors:
                 with self._lock:
                     job.files.append(FileRow(name=name, ok=False, error=why))

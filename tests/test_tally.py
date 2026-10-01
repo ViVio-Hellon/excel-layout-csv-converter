@@ -45,6 +45,26 @@ class Base(unittest.TestCase):
     def rows(self, *paths) -> list[list[str]]:
         return tally.build(list(paths)).rows
 
+    def two_slot_book(self, file: str = "two.xlsx") -> Path:
+        """**停止2枠のテンプレート。** 枠が1つ少ないぶん、右の列が2つ左へ。
+
+        実物は手元に無いので、`docs/座標表.md` の3枠の並びから2列ぶん
+        詰めて組み立てます(作業時間 AC→AA、用途コード AE→AC …)。
+        """
+        cells = {
+            "A1": "集計",
+            "S7": "内容ナイヨウ", "T7": "時間（分）",
+            "U7": "内容ナイヨウ", "V7": "時間（分）",
+            "W7": "枚数", "X7": "重量(kg）",
+            "AA7": "作業時間（分）", "AB7": "単重（Kg）",
+            "AC7": "用途コード", "AD7": "用途名", "AE7": "納入先",
+            "AF7": "包装仕様NO",
+            "D8": "L1", "L8": "9",
+        }
+        path = self.tmp / file
+        write_xlsx(path, cells, name=NAME)
+        return path
+
 
 class 拾う行(Base):
     def test_終了時刻がある行を拾う(self) -> None:
@@ -102,7 +122,7 @@ class 対象シート(Base):
         path = self.book({8: {"D": "L1", "L": "9"}}, A1="日報")
         found = tally.build([path])
         self.assertEqual(found.rows, [])
-        self.assertIn("対象外", found.sheets[0].skipped)
+        self.assertIn("A1が「集計」ではありません", found.sheets[0].skipped)
 
     def test_ふりがな付きのA1でも拾う(self) -> None:
         """実物の2025年のブックは `A1` に**ふりがな**が付いていました。
@@ -119,10 +139,22 @@ class 対象シート(Base):
         self.assertEqual(found.rows[0][tally.LOT], "L1")
 
     def test_名前に機側が無ければ拾わない(self) -> None:
+        """**どの条件で外れたのかと、実際の値まで言います。**
+
+        「対象外」とだけ出ていると、直しようがありません。
+        """
         path = self.book({8: {"D": "L1", "L": "9"}}, name="2026年8月23日_HVC")
         found = tally.build([path])
         self.assertEqual(found.rows, [])
-        self.assertIn("対象外", found.sheets[0].skipped)
+        self.assertIn("シート名に「_機側」がありません", found.sheets[0].skipped)
+        self.assertIn("2026年8月23日_HVC", found.sheets[0].skipped)
+
+    def test_A1が違えば実際の値まで言う(self) -> None:
+        """**直しようがあるように**、いま何が入っているかを出します。"""
+        path = self.book({8: {"D": "L1", "L": "9"}}, A1="集計表(旧)")
+        found = tally.build([path])
+        self.assertEqual(found.rows, [])
+        self.assertIn("集計表(旧)", found.sheets[0].skipped)
 
     def test_停止2枠のブックは断る(self) -> None:
         """**黙って読みません。** 列が2つずれていて、別の値が入ります。"""
@@ -132,6 +164,54 @@ class 対象シート(Base):
         self.assertEqual(found.rows, [])
         self.assertIn("見出しが違います", found.sheets[0].skipped)
         self.assertIn("停止3枠", found.sheets[0].skipped)
+
+    def test_2枠のテンプレートだと分かればそう言う(self) -> None:
+        """**「3枠なのに読めない」ものを探せるように**、2枠はそう名指しします。"""
+        path = self.two_slot_book()
+        found = tally.build([path])
+        self.assertEqual(found.rows, [])
+        self.assertIn("停止2枠のブックです", found.sheets[0].skipped)
+
+
+class 点検(Base):
+    """読める相手かどうかを、**拾う前に**見る(`check_book`)。
+
+    「停止3枠なのに読めないブックがあるか」を探すための道具です。
+    """
+
+    def test_読めるシートは枠まで言える(self) -> None:
+        found = tally.check_book(self.book({8: {"D": "L1", "L": "9"},
+                                            9: {"D": "L2", "L": "10"}}))
+        self.assertEqual(len(found), 1)
+        self.assertTrue(found[0]["ok"], found[0]["why"])
+        self.assertEqual(found[0]["frame"], tally.FRAME_THREE)
+        self.assertEqual(found[0]["rows"], 2)
+
+    def test_2枠は2枠と言う(self) -> None:
+        found = tally.check_book(self.two_slot_book())
+        self.assertFalse(found[0]["ok"])
+        self.assertEqual(found[0]["frame"], tally.FRAME_TWO)
+
+    def test_読めるが0行ならそう言う(self) -> None:
+        """**「読めた」と「拾えた」は別です。** ○ で0行は言っておきます。"""
+        path = self.book({8: {"D": "L1", "W": "段取り", "X": "20"}})
+        found = tally.check_book(path)
+        self.assertTrue(found[0]["ok"])
+        self.assertTrue(found[0]["empty"])
+        self.assertEqual(found[0]["rows"], 0)
+        self.assertIn("L列", found[0]["why"])
+        # 集計そのものでも、同じことを注記として出します
+        table = tally.build([path])
+        self.assertEqual(table.rows, [])
+        self.assertIn("L列", table.sheets[0].note)
+
+    def test_読めないブックも1件として返す(self) -> None:
+        path = self.tmp / "こわれ.xlsx"
+        path.write_bytes("xlsx ではありません".encode("utf-8"))
+        found = tally.check_book(path)
+        self.assertEqual(len(found), 1)
+        self.assertFalse(found[0]["ok"])
+        self.assertTrue(found[0]["why"])
 
     def test_日付はシート名から採る(self) -> None:
         found = self.rows(self.book({8: {"D": "L1", "L": "9"}}))

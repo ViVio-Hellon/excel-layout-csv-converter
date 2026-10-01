@@ -193,7 +193,15 @@
 
       <div class="row">
         <button class="primary big" id="tally-start">集計する</button>
+        <label class="check"><input type="checkbox" id="tally_dry_run">
+          確かめるだけ(CSVを書きません)</label>
         <span class="msg">出す先は設定部の「出力先フォルダ」です。</span>
+      </div>
+
+      <div class="notice">
+        <b>読めるかどうかだけ見たいとき</b>は「確かめるだけ」で実行してください。
+        1枚ずつ、拾える行数か、<b>拾わない理由</b>(シート名・A1・見出し・停止2枠)
+        が結果に出ます ── 停止3枠なのに読めないブックを探すのに使えます。
       </div>
     </section>
   </div>

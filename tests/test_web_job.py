@@ -48,6 +48,35 @@ class TallyTabTests(WebCase):
         self.assertEqual(status, 400)
         self.assertIn("出力先", data["detail"])
 
+    def test_確かめるだけなら出力先が無くても始まる(self) -> None:
+        """**読めるかどうかだけ見たい**ときに、出力先を聞きません。
+
+        「停止3枠なのに読めないブック」を探す使い方です。
+        """
+        screen_id = self.claim()
+        self._put(screen_id)
+        status, data = self.request("POST", "/api/job/start",
+                                    {"tab": "tally", "dry_run": True},
+                                    screen_id=screen_id)
+        self.assertEqual(status, 200, data)
+        job = self.wait_for_job()
+        self.assertEqual(job["state"], jobs.DONE)
+        self.assertTrue(job["dry_run"])
+        self.assertEqual(job["written"], 0)
+        self.assertIn("確かめるだけ", job["message"])
+
+    def test_確かめるだけならCSVを書かない(self) -> None:
+        screen_id = self.claim()
+        out = self.tmp / "out"
+        self.settings(screen_id, output_dir=str(out))
+        self._put(screen_id)
+        status, _data = self.request("POST", "/api/job/start",
+                                     {"tab": "tally", "dry_run": True},
+                                     screen_id=screen_id)
+        self.assertEqual(status, 200)
+        self.wait_for_job()
+        self.assertFalse(list(out.rglob("機側データ集計*.csv")))
+
     def test_読む相手が無ければ始めない(self) -> None:
         screen_id = self.claim()
         self.settings(screen_id, output_dir=str(self.tmp / "out"))

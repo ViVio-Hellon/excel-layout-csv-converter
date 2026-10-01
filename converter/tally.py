@@ -217,17 +217,90 @@ def layout_problem(sheet) -> str:
     return ""
 
 
+#: 停止2枠のブックの目印。停止の枠が2つ(S・T / U・V)しか無いぶん、
+#: **その右の列が3枠より2つ左へずれます**(作業時間 AC→AA、用途コード AE→AC)
+TWO_SLOT_CELLS: tuple[tuple[str, str], ...] = (
+    ("S7", "内容"), ("T7", "時間"), ("U7", "内容"), ("V7", "時間"),
+    ("AA7", "作業時間"), ("AC7", "用途コード"),
+)
+
+FRAME_THREE = "3枠"
+FRAME_TWO = "2枠"
+
+
+def stop_frame(sheet) -> str:
+    """停止の枠がいくつのテンプレートか。`3枠` / `2枠` / `""`(分からない)。
+
+    **読めるのは3枠だけ**ですが、読めなかったときに「2枠だから」と言えると
+    探す手間が違います ── 「3枠なのに読めない」ものを見つけたいので。
+    """
+    if not layout_problem(sheet):
+        return FRAME_THREE
+    if all(expected in sheet.cell(ref).replace("\n", "")
+           for ref, expected in TWO_SLOT_CELLS):
+        return FRAME_TWO
+    return ""
+
+
+def why_skipped(sheet) -> str:
+    """このシートを拾わない理由。**空なら拾えます。**
+
+    条件を1つずつ見て、**どれで外れたのかと、実際の値**を言います ──
+    「対象外」とだけ出ていると、直しようがありません。
+    """
+    if NAME_MARK not in sheet.name:
+        return (f"シート名に「{NAME_MARK}」がありません(名前: 「{sheet.name}」)。"
+                "VBAも同じ条件でシートを選びます")
+    mark = sheet.cell(MARK_CELL)
+    if mark != MARK_VALUE:
+        return (f"{MARK_CELL}が「{MARK_VALUE}」ではありません"
+                f"(いまは「{mark or '空'}」)。VBAも同じ条件でシートを選びます")
+    if stop_frame(sheet) == FRAME_TWO:
+        return ("停止2枠のブックです(作業時間が AA 列 ── 3枠より2つ左に"
+                "ずれています)。読めるのは停止3枠だけです")
+    return layout_problem(sheet)
+
+
+#: 読めるのに1行も拾えないときの言い分。**0行も「読めない」のうち**です
+EMPTY_NOTE = ("拾える行がありません(終了時刻のL列が空なので、VBAも"
+              "1行も拾いません)")
+
+
+def count_rows(rows: dict) -> int:
+    """このシートから拾える行数(VBAと同じ条件・同じ範囲)。"""
+    return sum(1 for number in range(FIRST_ROW, last_row_of(rows) + 1)
+               if wanted(rows.get(number, {})))
+
+
+def check_sheet(sheet, *, file_name: str = "") -> dict:
+    """1枚ぶんの**点検結果**。読む相手を探すときに使います(拾いません)。"""
+    why = why_skipped(sheet)
+    rows = sheet.rows
+    found = count_rows(rows)
+    return {"file": file_name, "sheet": sheet.name,
+            "mark": sheet.cell(MARK_CELL), "frame": stop_frame(sheet),
+            "ok": not why, "why": why or (EMPTY_NOTE if not found else ""),
+            "empty": not why and not found,
+            "last_row": last_row_of(rows), "rows": found}
+
+
+def check_book(path) -> list[dict]:
+    """ブック1冊の全シートを点検する。読めなければ理由を1件返します。"""
+    try:
+        sheets = read_sheets(Path(path))
+    except (NotXlsx, OSError) as exc:
+        return [{"file": Path(path).name, "sheet": "", "mark": "", "frame": "",
+                 "ok": False, "why": str(exc), "last_row": 0, "rows": 0}]
+    return [check_sheet(sheet, file_name=Path(path).name) for sheet in sheets]
+
+
 def take_sheet(sheet, *, file_name: str = "") -> tuple[list[list[str]], SheetResult]:
     """シート1枚から行を拾う。**VBAの転記そのまま。**"""
     result = SheetResult(file=file_name, sheet=sheet.name,
                          date=sheet_date(sheet.name))
-    if sheet.cell(MARK_CELL) != MARK_VALUE or NAME_MARK not in sheet.name:
-        result.skipped = f"対象外({MARK_CELL}が「{MARK_VALUE}」で名前に{NAME_MARK}を含むシートだけ)"
-        return [], result
-
-    problem = layout_problem(sheet)
-    if problem:
-        result.skipped = problem
+    why = why_skipped(sheet)
+    if why:
+        result.skipped = why
         return [], result
 
     rows = sheet.rows
@@ -247,6 +320,10 @@ def take_sheet(sheet, *, file_name: str = "") -> tuple[list[list[str]], SheetRes
             line[LOT] = previous_lot
         taken.append(line)
     result.rows = len(taken)
+    if not taken:
+        # **0行も言っておきます。** ○ と出ているのに何も増えないのは、
+        # 「読めた」と「拾えた」が別だと分かっていないと気づけません
+        result.note = EMPTY_NOTE
     return taken, result
 
 
@@ -700,7 +777,9 @@ def build(paths, *, on_file=None) -> Tally:
 
     `paths` の順がそのまま**積む順**です(上詰めの補完は並び順で結果が
     変わるので、呼ぶ側が名前順に並べてから渡してください)。
-    `on_file` は1冊終わるたびに呼ばれます(進み具合を出すため)。
+    `on_file` は1冊終わるたびに呼ばれます(進み具合を出すため)。渡すのは
+    **その1冊から出た結果の全部**です ── 1冊に何枚も入っていることがあり、
+    最後の1枚だけ渡すと「拾われなかった残りの枚数」が画面から消えます。
 
     **CSVは先に1度のぞきます**(`_scan_csv`) ── 停止内訳CSVの内訳名を、
     集計明細CSVを読むときに使うためです。入れた順(ドラッグの順)に左右
@@ -715,23 +794,23 @@ def build(paths, *, on_file=None) -> Tally:
             tally.rows.extend(rows)
             tally.sheets.append(result)
             if on_file:
-                on_file(path, index, len(paths), result)
+                on_file(path, index, len(paths), [result])
             continue
         try:
             sheets = read_sheets(path)
         except (NotXlsx, OSError) as exc:
             tally.errors.append((path.name, str(exc)))
             if on_file:
-                on_file(path, index, len(paths), None)
+                on_file(path, index, len(paths), [])
             continue
-        last: SheetResult | None = None
+        made: list[SheetResult] = []
         for sheet in sheets:
             rows, result = take_sheet(sheet, file_name=path.name)
             tally.rows.extend(rows)
             tally.sheets.append(result)
-            last = result
+            made.append(result)
         if on_file:
-            on_file(path, index, len(paths), last)
+            on_file(path, index, len(paths), made)
     _fill_all(tally.rows)
     return tally
 

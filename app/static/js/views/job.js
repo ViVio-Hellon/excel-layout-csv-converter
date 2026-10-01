@@ -94,7 +94,7 @@ function renderResult(job, tally) {
     ? [["読んだもの", counts.read_ok + " / " + counts.files, ""],
        ["拾った行", job.tally_rows, ""],
        ["飛ばしたもの", counts.bad, counts.bad ? "warn" : ""],
-       ["書いたCSV", job.written, ""]]
+       [job.dry_run ? "書いたCSV(確認のみ)" : "書いたCSV", job.written, ""]]
     : [["読めた", counts.read_ok + " / " + counts.files, ""],
        ["数が合った", counts.verified, ""],
        ["数が合わない", counts.suspect, counts.suspect ? "warn" : ""],
@@ -177,7 +177,8 @@ export function wire() {
     source: folderSource() ? "folder" : "intake",
     dry_run: $("dry_run").checked,
   }));
-  $("tally-start").addEventListener("click", () => begin({ tab: "tally" }));
+  $("tally-start").addEventListener("click", () => begin({
+    tab: "tally", dry_run: $("tally_dry_run").checked }));
   $("cancel").addEventListener("click", cancel);
   // 閉じているあいだに走っていた仕事があれば、そのまま引き継ぐ
   return api("/api/job").then((result) => {

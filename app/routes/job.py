@@ -43,13 +43,14 @@ def start(request: Request) -> Response:
 def _start_tally(payload: dict) -> Response:
     """機側データ集計タブ。**変換はしません**(4本組CSVは出ません)。"""
     settings = user_settings.load()
-    if not settings.output_dir:
+    dry_run = bool(payload.get("dry_run", False))
+    if not settings.output_dir and not dry_run:
         return refuse("設定を確かめてください",
                       "出力先フォルダが未設定です(設定部で指定してください)",
                       status=400)
     sources = intake.get(intake.TALLY).files()
     try:
-        snapshot = jobs.RUNNER.start_tally(sources, settings)
+        snapshot = jobs.RUNNER.start_tally(sources, settings, dry_run=dry_run)
     except (ValueError, RuntimeError) as exc:
         return refuse("始められません", str(exc), status=400)
     return json_response({"ok": True, "job": snapshot})
