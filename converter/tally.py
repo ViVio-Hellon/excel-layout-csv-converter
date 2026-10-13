@@ -709,21 +709,81 @@ def _slot_label(index: int) -> str:
     return csv_export.STOP_SLOT_LABELS.get(index, "")
 
 
+#: 作業停止の枠。**①〜⑤**まで見ます(④⑤の列が無い集計明細CSVもあります)
+SLOT_MARKS: tuple[str, ...] = ("①", "②", "③", "④", "⑤")
+
+#: 記号の文字種 → 内訳-1/2/3。**位置ではなく文字種で振り分けます**
+#: (現場のシートがそうしているため ── 数字=管理ロス / 片仮名=段取り・突発 /
+#:  英字=ハンドリング)。日報管理ツールの `集計_…csv` の3分類も同じ分け方です
+CLASS_OF_KIND = {"数値": 0, "カタカナ": 1, "アルファベット": 2}
+
+
+def stop_class(code: str) -> int:
+    """記号 → 内訳の枠(0/1/2)。**分けられなければ -1。**
+
+    判定は移行元の `classify_stop_code`(VBA `CheckCharType` の移植)を
+    そのまま使います ── 日報管理ツールの集計と同じ分け方にするためで、
+    こちらで書き直すと片方だけ直したときにずれます。
+    """
+    try:
+        from nippou.logic.aggregation import classify_stop_code
+        return CLASS_OF_KIND.get(classify_stop_code(code), -1)
+    except Exception:                             # noqa: BLE001 - 分けない
+        return -1
+
+
+def _slot_labels(at: dict, labels: dict) -> list[tuple[str, str, str]]:
+    """集計明細CSVにある停止の枠を `(記号の列名, 時間の列名, 位置の呼び名)` で。
+
+    ①②③の見出しは移行元の定義から来ます(`detail_labels` / `_slot_label`)。
+    **④⑤は こちらの写しに列がない**ので、①の見出しの印を差し替えて
+    探します ── 日報管理ツールが先に進んで④⑤を出すようになっても拾える
+    ように(位置の呼び名も同じやり方で作ります)。
+    """
+    first_code = labels.get("AJ", "")             # 例: 「作業停止① 記号」
+    first_time = labels.get("AK", "")             # 例: 「作業停止① 時間(分)」
+    found: list[tuple[str, str, str]] = []
+    for index, mark in enumerate(SLOT_MARKS, start=1):
+        code = first_code.replace(SLOT_MARKS[0], mark) if first_code else ""
+        time = first_time.replace(SLOT_MARKS[0], mark) if first_time else ""
+        if code in at and time in at:
+            found.append((code, time,
+                          _slot_label(index) or f"作業停止{mark}"))
+    return found
+
+
 def _take_detail_csv(grid: list[list[str]], result: SheetResult,
                      stops: StopNames | None):
     """**変換が出した集計明細CSV**を、シートと同じに読む。
 
     拾う行の条件は VBA と同じです ── 終了時刻が入っている行、または
-    停止(記号と時間)の対が書かれている行(`wanted`)。
+    停止が1つでも数えられた行。
 
-    停止の枠には、シートなら**振り分け後の内訳名**(S/U/W)が入っています。
-    集計明細CSVにあるのは**振り分け前の記号**(AJ〜AO)だけなので、同じ日の
-    停止内訳CSVがあればそこから内訳名を引きます。引けない記号は**記号の
-    まま入れて、そう言います**(黙って空にしません)。
+    【停止は「位置」ではなく「記号の文字種」で振り分けます】
+    シートの内訳-1/2/3(S・U・W)は、**振り分け前**(AJ〜AO)の記号を
+    文字種で振り分けた結果です:
+
+        数字(0・1…)     → 内訳-1(管理ロス)
+        片仮名(ヲ・タ…) → 内訳-2(段取り・突発)
+        英字(E・B…)     → 内訳-3(ハンドリング)
+
+    集計明細CSVにあるのは**振り分け前の記号**なので、同じ振り分けをして
+    から入れます。**位置のまま入れると分類がずれます** ── 作業停止①に
+    片仮名が入っていれば、それは内訳-2です。
+
+    **1行に同じ枠の停止が2つ**あることもあります(①と②がどちらも片仮名
+    など)。そのときは**行を増やします**(2行目以降は停止だけ。ほかの欄は
+    あとの空欄埋めで前の行から埋まります)── 現場のシートと同じ形です。
+
+    枠は**①〜⑤**まで見ます(④⑤の列が無いCSVもあります)。文字種で分けられ
+    ない記号(全角のＢなど)は**集計に入れず、そう言います**。
+
+    停止の名前は、同じ日の停止内訳CSV(または設定部のマスタ)から引きます。
+    引けない記号は**記号のまま入れて、そう言います**(黙って空にしません)。
 
     **振り分け前は、現場が記号のまま先に書き込む欄**です(`AJ4` に
-    「振り分け前」と書いてあります)。書き損じも入り得るので、変換が残した
-    材料CSV(振り分け後)があるときは**そちらが優先**されます。
+    「振り分け前」と書いてあります)。変換が残した材料CSV(振り分け後)が
+    あるときは**そちらが優先**されます。
     """
     result.kind = "CSV(集計明細)"
     stops = stops or {}
@@ -748,59 +808,98 @@ def _take_detail_csv(grid: list[list[str]], result: SheetResult,
     columns = columns_for(result.line)     # 板とコイルで後ろ3列が違います
     places = {column: source(column, name) for name, column in columns}
     end_hour = source(END_HOUR_COLUMN, "")
+    slots = _slot_labels(at, labels)
     taken: list[list[str]] = []
-    unknown: list[str] = []
+    unknown: list[str] = []                # 名前が引けなかった記号
+    unclassed: list[str] = []              # 文字種で分けられなかった記号
+    placed = 0                             # 振り分けた停止の数
+    seen: set[tuple[str, ...]] = set()     # 同じ 日付・直・ページ・行 は1回だけ
+
+    def cell(line: list[str], name: str) -> str:
+        where = at.get(name, -1)
+        return line[where].strip() if 0 <= where < len(line) else ""
 
     for line in grid[1:]:
-        if not any(cell.strip() for cell in line):
+        if not any(cell_text.strip() for cell_text in line):
             continue
         if len(line) < len(head):
             line = list(line) + [""] * (len(head) - len(line))
+
+        key = tuple(cell(line, name) for name in
+                    ("ライン", "日付", "直", "ページ", "行"))
+        if any(key) and key in seen:
+            continue                              # 同じ行が2回(VBAと同じ)
+        seen.add(key)
 
         def value(column: str) -> str:
             place = places.get(column, -1)
             return line[place].strip() if 0 <= place < len(line) else ""
 
         values = {column: value(column) for _name, column in columns}
-        # 停止は「記号+時間」から。内訳名が引ければ名前に替えます
-        for index, (content, minutes, code_col, time_col) in enumerate(
-                STOP_SLOTS, start=1):
-            code_at, time_at = source(code_col, ""), source(time_col, "")
-            code = line[code_at].strip() if 0 <= code_at < len(line) else ""
-            span = line[time_at].strip() if 0 <= time_at < len(line) else ""
-            name = ""
-            if code:
-                key = (line[at["日付"]].strip() if "日付" in at else "",
-                       line[at["直"]].strip() if "直" in at else "",
-                       line[at["ページ"]].strip() if "ページ" in at else "",
-                       line[at["行"]].strip() if "行" in at else "",
-                       _slot_label(index))
-                name = stops.get(key) or stops.get(("記号", code)) or ""
-                if not name:
-                    name = code
-                    if code not in unknown:
-                        unknown.append(code)
-            values[content] = name
-            values[minutes] = span
 
-        if not ((0 <= end_hour < len(line) and line[end_hour].strip())
-                or any(values.get(c) and values.get(m)
-                       for c, m, _s, _t in STOP_SLOTS)):
+        # --- 停止を文字種で振り分ける(①〜⑤) ------------------------
+        found: list[list[tuple[str, str]]] = [[], [], []]
+        for code_label, time_label, slot in slots:
+            code = cell(line, code_label)
+            span = cell(line, time_label)
+            if not (code and span):
+                continue
+            place = stop_class(code)
+            if place < 0:
+                if code not in unclassed:
+                    unclassed.append(code)
+                continue
+            where = (cell(line, "日付"), cell(line, "直"), cell(line, "ページ"),
+                     cell(line, "行"), slot)
+            name = stops.get(where) or stops.get(("記号", code)) or ""
+            if not name:
+                name = code
+                if code not in unknown:
+                    unknown.append(code)
+            found[place].append((name, span))
+            placed += 1
+
+        last_hour = (line[end_hour].strip()
+                     if 0 <= end_hour < len(line) else "")
+        if not (last_hour or any(found)):
             continue
-        date = line[at["日付"]].strip() if "日付" in at else ""
-        taken.append([date] + [values.get(column, "")
-                               for _name, column in columns])
+
+        # --- 同じ枠に2つ以上あれば、その数だけ行を増やす ------------
+        date = cell(line, "日付")
+        depth = max(1, *(len(one) for one in found))
+        for step in range(depth):
+            if step == 0:
+                row = dict(values)
+                # **CSVは0を空欄で出します。** 終了時刻があるなら 0分です
+                if (not row.get("AC")) and last_hour:
+                    row["AC"] = "0"
+            else:
+                row = {column: "" for _name, column in columns}
+            for place, (content, minutes, _c, _t) in enumerate(STOP_SLOTS):
+                if step < len(found[place]):
+                    row[content], row[minutes] = found[place][step]
+                else:
+                    row[content] = row[minutes] = ""
+            taken.append([date] + [row.get(column, "")
+                                   for _name, column in columns])
 
     result.rows = len(taken)
     result.date = taken[0][0] if taken else ""
-    if taken:
-        result.note = ("停止は**振り分け前(記号)**から読みました"
-                       "(集計明細CSVには振り分け後の内訳名がありません)。")
+    notes = []
+    if placed:
+        notes.append(f"停止 {placed}件は振り分け前(記号)を文字種で"
+                     "振り分けました"
+                     "(数字→内訳-1 / 片仮名→内訳-2 / 英字→内訳-3)")
     if unknown:
-        result.note += ("停止の内訳名が分からない記号は、記号のまま入れました: "
-                       + " ".join(unknown[:8])
-                       + "(同じ日の停止内訳CSVを一緒に入れるか、設定部の"
-                         "「停止内訳CSVの置き場所」を指してください)")
+        notes.append("内訳名が分からない記号は、記号のまま入れました: "
+                     + " ".join(unknown[:8])
+                     + "(同じ日の停止内訳CSVを一緒に入れるか、設定部の"
+                       "「停止内訳CSVの置き場所」を指してください)")
+    if unclassed:
+        notes.append("文字種で分けられない記号は集計に入れていません: "
+                     + " ".join(unclassed[:8])
+                     + "(数字・片仮名・英字のどれかにしてください)")
+    result.note = "。".join(notes)
     return taken, result
 
 

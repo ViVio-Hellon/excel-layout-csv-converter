@@ -503,26 +503,60 @@ class 変換が出したCSVを読む(Base):
         ])])
         self.assertEqual(found.dates, ["2026年8月23日", "2026年8月24日"])
 
-    # -- 停止の内訳名 ------------------------------------------------
+    # -- 停止の振り分け ----------------------------------------------
+    def stop_of(self, row: list, slot: int) -> tuple:
+        """内訳-1/2/3 の `(名前, 分)`。
+
+        見出しの「時間（分）」は3回出てくるので、**名前を数えるのではなく
+        位置で採ります**(`list(...).index()` だと1つめしか採れません)。
+        """
+        names = list(tally.HEADERS)
+        where = [i for i, name in enumerate(names)
+                 if name.startswith("作業停止内訳-")]
+        at = where[slot - 1]
+        return row[at], row[at + 1]
+
+    def test_停止は記号の文字種で振り分ける(self) -> None:
+        """**位置ではなく記号の文字種**で内訳-1/2/3に入ります。
+
+        現場のシート(振り分け前 → 振り分け後)と同じ分け方です:
+
+            数字(0・1…)     → 内訳-1(管理ロス)
+            片仮名(ヲ・タ…) → 内訳-2(段取り・突発)
+            英字(E・B…)     → 内訳-3(ハンドリング)
+
+        **作業停止①に片仮名が入っていれば、それは内訳-2です** ──
+        位置のまま入れると、日報管理ツールの `集計_…csv` とずれます。
+        """
+        detail = self.detail_csv([self.detail_row(
+            D="L1", L="9", AJ="タ", AK="30", AL="E", AM="20", AN="3",
+            AO="10")])
+        found = tally.build([detail])
+        self.assertEqual(len(found.rows), 1, found.sheets[0].skipped)
+        row = found.rows[0]
+        self.assertEqual(self.stop_of(row, 1), ("3", "10"))    # 数字
+        self.assertEqual(self.stop_of(row, 2), ("タ", "30"))   # 片仮名
+        self.assertEqual(self.stop_of(row, 3), ("E", "20"))    # 英字
+        self.assertIn("文字種", found.summary())
+
     def test_停止は内訳名が引ければ名前で入る(self) -> None:
         """集計明細にあるのは**記号**だけです。名前は停止内訳CSVから。"""
         detail = self.detail_csv([self.detail_row(D="L1", L="9",
-                                                 AJ="タ", AK="30")])
+                                                  AJ="タ", AK="30")])
         stops = self.stops_csv([{
             "日付": "2026年8月23日", "ライン": "LS", "直": "1直",
             "区分": "1件ずつ", "分類": "段取り・突発停止", "記号": "タ",
             "内訳": "材料待ち", "ページ": "1", "行": "1",
             "停止の位置": "作業停止①", "回数": "1", "停止時間(分)": "30"}])
         found = tally.build([detail, stops])
-        row = found.rows[0]
-        self.assertEqual(row[list(tally.HEADERS).index("作業停止内訳-1")],
-                         "材料待ち")
-        self.assertEqual(row[list(tally.HEADERS).index("時間（分）")], "30")
+        # 「タ」は片仮名なので、**①に入っていても内訳-2**
+        self.assertEqual(self.stop_of(found.rows[0], 2), ("材料待ち", "30"))
+        self.assertEqual(self.stop_of(found.rows[0], 1), ("", ""))
 
     def test_順番を変えても内訳名は引ける(self) -> None:
         """**ドラッグの順に左右されません**(先にCSVをのぞきます)。"""
         detail = self.detail_csv([self.detail_row(D="L1", L="9",
-                                                 AJ="タ", AK="30")])
+                                                  AJ="タ", AK="30")])
         stops = self.stops_csv([{
             "日付": "2026年8月23日", "ライン": "LS", "直": "1直",
             "区分": "1件ずつ", "記号": "タ", "内訳": "材料待ち",
@@ -530,18 +564,78 @@ class 変換が出したCSVを読む(Base):
         for order in ([detail, stops], [stops, detail]):
             with self.subTest(order=[p.name for p in order]):
                 found = tally.build(order)
-                self.assertEqual(
-                    found.rows[0][list(tally.HEADERS).index("作業停止内訳-1")],
-                    "材料待ち")
+                self.assertEqual(self.stop_of(found.rows[0], 2)[0], "材料待ち")
 
     def test_引けない記号は記号のまま言う(self) -> None:
         """**黙って空にしません。** 何が引けなかったかまで出します。"""
         found = tally.build([self.detail_csv(
             [self.detail_row(D="L1", L="9", AJ="タ", AK="30")])])
-        self.assertEqual(
-            found.rows[0][list(tally.HEADERS).index("作業停止内訳-1")], "タ")
+        self.assertEqual(self.stop_of(found.rows[0], 2), ("タ", "30"))
         self.assertIn("記号のまま", found.summary())
         self.assertIn("タ", found.summary())
+
+    def test_作業停止の4つめ5つめも読む(self) -> None:
+        """**枠は①〜⑤まで見ます。**
+
+        今の集計明細CSVには④⑤の列がありません。日報管理ツールが先に
+        進んで出すようになったとき、**黙って落とさない**ようにします
+        (①の見出しの印を差し替えて探します)。
+        """
+        from nippou.reporting import csv_export
+
+        more = ["作業停止④ 記号", "作業停止④ 時間(分)",
+                "作業停止⑤ 記号", "作業停止⑤ 時間(分)"]
+        row = self.detail_row(D="L1", L="9")
+        row.update({"作業停止④ 記号": "2", "作業停止④ 時間(分)": "15",
+                    "作業停止⑤ 記号": "E", "作業停止⑤ 時間(分)": "25"})
+        detail = self._write("集計明細_2026-08-23_LS.csv",
+                             list(csv_export.DETAIL_FIELDNAMES) + more, [row])
+        found = tally.build([detail])
+        self.assertEqual(len(found.rows), 1, found.sheets[0].skipped)
+        self.assertEqual(self.stop_of(found.rows[0], 1), ("2", "15"))
+        self.assertEqual(self.stop_of(found.rows[0], 3), ("E", "25"))
+
+    def test_同じ枠に2つあれば行を増やす(self) -> None:
+        """1行に片仮名が2つなら、**内訳-2の枠は1つ**しかありません。
+
+        現場のシートと同じく**行を増やします**(2行目は停止だけ ── 作業
+        時間を写すと二重に数えます)。ロット№などは上詰めで埋まります。
+        """
+        detail = self.detail_csv([self.detail_row(
+            D="L1", L="9", AC="35", AJ="タ", AK="30", AL="ヲ", AM="20")])
+        found = tally.build([detail])
+        self.assertEqual(len(found.rows), 2)
+        self.assertEqual(self.stop_of(found.rows[0], 2), ("タ", "30"))
+        self.assertEqual(self.stop_of(found.rows[1], 2), ("ヲ", "20"))
+        work = list(tally.HEADERS).index("作業時間（分）")
+        self.assertEqual([r[work] for r in found.rows], ["35", ""])
+        self.assertEqual([r[tally.LOT] for r in found.rows], ["L1", "L1"])
+
+    def test_分けられない記号は入れずにそう言う(self) -> None:
+        """全角のＢなどは、どの内訳とも言えません。**数えずに知らせます。**"""
+        found = tally.build([self.detail_csv([self.detail_row(
+            D="L1", L="9", AJ="Ｂ", AK="30", AL="3", AM="10")])])
+        row = found.rows[0]
+        self.assertEqual(self.stop_of(row, 1), ("3", "10"))
+        self.assertEqual(self.stop_of(row, 3), ("", ""))
+        self.assertIn("分けられない", found.summary())
+        self.assertIn("Ｂ", found.summary())
+
+    def test_同じ行が2回あっても1回だけ(self) -> None:
+        """同じ 日付・直・ページ・行 は1回だけ数えます(VBAと同じ)。"""
+        row = self.detail_row(D="L1", L="9", AJ="タ", AK="30")
+        found = tally.build([self.detail_csv([row, dict(row)])])
+        self.assertEqual(len(found.rows), 1)
+        self.assertEqual(self.stop_of(found.rows[0], 2), ("タ", "30"))
+
+    def test_作業時間が空で終了時刻があれば0(self) -> None:
+        """**CSVは0を空欄で出します。** 終了しているなら 0分です。"""
+        found = tally.build([self.detail_csv(
+            [self.detail_row(D="L1", L="9")])])
+        work = list(tally.HEADERS).index("作業時間（分）")
+        self.assertEqual(found.rows[0][work], "0")
+        # 停止が1つも無い日に「振り分けました」とは言いません
+        self.assertNotIn("文字種", found.summary())
 
     def test_停止内訳CSVだけでは行が出ない(self) -> None:
         stops = self.stops_csv([{
@@ -575,9 +669,7 @@ class 変換が出したCSVを読む(Base):
         found = tally.build(sorted([detail, stops, self.day_csv(),
                                     self.formula_csv()]))
         self.assertEqual(len(found.rows), 1)
-        self.assertEqual(
-            found.rows[0][list(tally.HEADERS).index("作業停止内訳-1")],
-            "材料待ち")
+        self.assertEqual(self.stop_of(found.rows[0], 2)[0], "材料待ち")
 
     def test_種類を見分けられる(self) -> None:
         from nippou.logic import formula
