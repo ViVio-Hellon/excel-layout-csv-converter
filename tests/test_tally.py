@@ -671,6 +671,43 @@ class 変換が出したCSVを読む(Base):
         self.assertEqual(len(found.rows), 1)
         self.assertEqual(self.stop_of(found.rows[0], 2)[0], "材料待ち")
 
+    def test_階層がちがっても同じ結果(self) -> None:
+        """**フォルダの分け方・深さで結果は変わりません。**
+
+        画面はフォルダをどの深さまでもたどり、**ファイル名の順**に積みます
+        (`app/static/js/views/input.js` の `walk` と、受け取り置き場へ
+        写すときの `intake.safe_name` ── 名前の最後の1つだけを採ります)。
+        だから「日付フォルダのまま」「全部平ら」「でたらめな深さ」でも
+        同じものが出ます。**停止内訳CSVが別の階層にあっても引けます**
+        (VBAは同じフォルダの中だけを見ます)。
+        """
+        detail = self.detail_csv([self.detail_row(D="L1", L="9",
+                                                  AJ="タ", AK="30")])
+        stops = self.stops_csv([{
+            "日付": "2026年8月23日", "ライン": "LS", "直": "1直",
+            "区分": "1件ずつ", "記号": "タ", "内訳": "材料待ち",
+            "ページ": "1", "行": "1", "停止の位置": "作業停止①"}])
+
+        def put(*folders: str) -> list[Path]:
+            """その階層に写して、**名前順**で集める(画面と同じ)。"""
+            made = []
+            for path, folder in zip((detail, stops), folders):
+                target = self.tmp / folder / path.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(path.read_bytes())
+                made.append(target)
+            return sorted(made, key=lambda p: p.name)
+
+        same = put("ならび/2026.08/23", "ならび/2026.08/23")   # 日付フォルダ
+        flat = put("ひとまとめ", "ひとまとめ")                 # 全部平ら
+        apart = put("ふかい/a/b/c/d", "まったく別/2026")        # 離れている
+        first = tally.build(same)
+        for order in (flat, apart):
+            with self.subTest(where=[str(p.parent.name) for p in order]):
+                found = tally.build(order)
+                self.assertEqual(found.rows, first.rows)
+                self.assertEqual(self.stop_of(found.rows[0], 2)[0], "材料待ち")
+
     def test_種類を見分けられる(self) -> None:
         from nippou.logic import formula
         from nippou.reporting import csv_export
