@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -45,11 +47,17 @@ class BootScreenTests(unittest.TestCase):
 
 class BootServerTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.boot = boot_server.BootApp(app_config.port())
+        self.boot = boot_server.BootApp(app_config.port(), stop_key=STOP_KEY)
         self.handover = boot_server.Handover(self.boot)
 
     def _get(self, path: str):
         return self.handover.dispatch(Request(method="GET", path=path))
+
+    def _stop(self, *, key: str = STOP_KEY):
+        import json
+        body = json.dumps({"stop_key": key}).encode("utf-8")
+        return self.handover.dispatch(Request(method="POST",
+                                              path="/api/shutdown", body=body))
 
     def test_待機画面を出す(self) -> None:
         response = self._get("/")
@@ -69,6 +77,41 @@ class BootServerTests(unittest.TestCase):
         """404 にすると「無い」に見えます。**まだであることを言う。**"""
         self.assertEqual(self._get("/api/job").status, 503)
 
+    def test_待機画面でも停止の合図で止まる(self) -> None:
+        """**本体を組み立てられなかったときに、ここが効きます。**
+
+        失敗すると待機画面に理由を出したまま残ります(読めるように)。
+        ここが止める合図に答えないと `stop.bat` でも `--force` でも
+        止まらず、Python が残って**フォルダを消せなくなります** ──
+        実際にそうなった報告があり、答えるようにしました。
+        """
+        stopped = []
+        self.boot.shutdown_hook = stopped.append
+        self.boot.mark_error("必要な部品がありません")
+        response = self._stop()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(stopped), 1)
+        self.assertIn("待機画面", stopped[0])
+
+    def test_にせの合図では止まらない(self) -> None:
+        """合図は `runtime/instance.json` の中だけにあります。"""
+        stopped = []
+        self.boot.shutdown_hook = stopped.append
+        self.assertEqual(self._stop(key="にせもの").status, 403)
+        self.assertFalse(stopped)
+
+    def test_合図を持っていないうちは止められない(self) -> None:
+        """確かめようがないときは断ります(PIDの道が残っています)。"""
+        boot = boot_server.BootApp(app_config.port())      # 合図なし
+        stopped = []
+        boot.shutdown_hook = stopped.append
+        import json
+        body = json.dumps({"stop_key": ""}).encode("utf-8")
+        response = boot.dispatch(Request(method="POST", path="/api/shutdown",
+                                         body=body))
+        self.assertEqual(response.status, 403)
+        self.assertFalse(stopped)
+
     def test_引き継いだら本体が答える(self) -> None:
         class Fake:
             def dispatch(self, request):
@@ -78,6 +121,61 @@ class BootServerTests(unittest.TestCase):
         self.handover.install(Fake())
         self.assertTrue(self.handover.handed_over)
         self.assertIn("本体", self._get("/").body.decode("utf-8"))
+
+
+class FailedBootTests(WebCase):
+    """**本体を組み立てられなかったときに、止められるか。**
+
+    現場の報告: 起動の途中で失敗したあと `stop.bat` でも `--force` でも
+    止まらず、Python が残って**フォルダを消せなくなった**(タスク
+    マネージャーで切るしかなかった)。ここが通れば、同じ状況でも
+    `stop.bat` で片づきます。
+    """
+
+    def test_起動に失敗しても止められる(self) -> None:
+        import launch_guard
+        import start_app
+
+        def boom(log) -> None:
+            raise RuntimeError("必要な部品がありません(わざと)")
+
+        codes: list[int] = []
+        with mock.patch.object(start_app, "warm_up", boom), \
+             mock.patch.object(start_app, "tell", lambda *a, **k: False):
+            runner = threading.Thread(
+                target=lambda: codes.append(
+                    start_app.start(open_browser_flag=False)),
+                daemon=True)
+            runner.start()
+            try:
+                lock = self._wait_for_lock()
+                # **理由を出したまま待っています**(読めるように)
+                found = launch_guard.check_existing()
+                self.assertEqual(found.state, launch_guard.OURS)
+                self.assertFalse(found.health.get("ready"))
+                self.assertIn("部品", found.health.get("startup_error", ""))
+
+                # stop.bat と同じ道 ── 合図は目印の中だけにあります
+                code, answer = launch_guard.request_shutdown(
+                    lock.port, lock.token, stop_key=lock.stop_key)
+                self.assertEqual(code, 200, answer)
+                runner.join(timeout=10)
+            finally:
+                if runner.is_alive():
+                    self.fail("止まりませんでした(待機画面が合図に答えていない)")
+        self.assertFalse(runner.is_alive())
+        self.assertEqual(codes, [start_app.EXIT_ENV])
+        self.assertIsNone(launch_guard.read_lock())   # 片づけてから終わる
+
+    def _wait_for_lock(self):
+        import launch_guard
+
+        for _ in range(100):
+            lock = launch_guard.read_lock()
+            if lock and lock.port:
+                return lock
+            time.sleep(0.05)
+        self.fail("待ち受けが立ちませんでした")
 
 
 class ShutdownTests(WebCase):

@@ -32,6 +32,7 @@ import argparse
 import os
 import secrets
 import sys
+import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -43,6 +44,12 @@ sys.path.insert(0, str(HERE / "vendor"))
 
 #: 動かすのに要る Python
 MIN_PYTHON = (3, 11)
+
+#: 本体を組み立てられなかったとき、理由の画面を出したまま待つ上限(秒)。
+#: **いつまでも残しません** ── 残ると、そのフォルダを消せなくなります
+#: (配り直しは「フォルダを消して置き直す」なので、ここが効きます)。
+#: 読むには十分な長さで、席を外しても片づく長さにしてあります
+FAILED_BOOT_LIMIT_SEC = 10 * 60
 
 EXIT_OK = 0
 EXIT_ENV = 1            # 実行環境が足りない
@@ -191,7 +198,7 @@ def start(*, open_browser_flag: bool = True) -> int:
     # 停止のための合図。**画面には渡しません** ── 起動トークンは画面の
     # HTMLに入るので、断られた2枚目のタブでも持ててしまいます
     stop_key = secrets.token_urlsafe(16)
-    boot = boot_server.BootApp(app_config.port())
+    boot = boot_server.BootApp(app_config.port(), stop_key=stop_key)
     handover = boot_server.Handover(boot)
     srv = server.AppServer(handover)
     try:
@@ -205,6 +212,10 @@ def start(*, open_browser_flag: bool = True) -> int:
 
     launch_guard.write_lock(launch_guard.new_lock(port=srv.port, token=token,
                                                  stop_key=stop_key))
+    # **待ち受けを始める前に、止められるようにします。** 本体を組み立て
+    # られないと待機画面のまま残るので、ここで繋いでおかないと `stop.bat`
+    # でも止まりません(実際にそうなった報告があります)
+    boot.shutdown_hook = srv.request_stop
     srv.start_serving()
     if open_browser_flag:
         open_browser(app_config.base_url(), log)
@@ -213,6 +224,13 @@ def start(*, open_browser_flag: bool = True) -> int:
         # -- 準備 ----------------------------------------------------
         handover.mark_stage("アプリを準備中", "prepare")
         warm_up(log)
+
+        if srv.stopping:
+            # 準備の途中で止めてと言われた。**続きは組み立てません** ──
+            # 画面を出さずに終わるので、ここから先は誰も使いません
+            log.info("準備中に停止を頼まれました。引き継ぎません")
+            log.info("終了しました: %s", srv.wait_until_stopped())
+            return EXIT_OK
 
         handover.mark_stage("接続を確認中", "connect")
         user_settings.apply_to_vendor(user_settings.load())
@@ -236,8 +254,26 @@ def start(*, open_browser_flag: bool = True) -> int:
     except Exception as exc:                      # noqa: BLE001 - 理由を出す
         log.exception("起動の途中で失敗しました")
         handover.mark_error(str(exc))
-        tell(f"起動できませんでした: {exc}", title="起動できません")
-        srv.wait_until_stopped()
+        # **知らせは別の糸で出します。** Windows の MessageBox は押される
+        # まで戻らないので、ここで待つと「止めてと言われても、誰かが
+        # OKを押すまで終われない」プロセスになります
+        threading.Thread(
+            target=tell, args=(f"起動できませんでした: {exc}",),
+            kwargs={"title": "起動できません"},
+            name="tell", daemon=True).start()
+        # **いつまでも残しません。** 理由を読む時間は置きますが、置き
+        # 去りにされたら自分で閉じます(残るとフォルダを消せません)
+        closer = threading.Timer(
+            FAILED_BOOT_LIMIT_SEC, srv.request_stop,
+            args=(f"起動に失敗した画面を閉じました"
+                  f"({FAILED_BOOT_LIMIT_SEC // 60}分)",))
+        closer.daemon = True
+        closer.start()
+        log.warning("理由の画面を出したまま待ちます(%d分で自分から閉じます)。"
+                    "stop.bat でも止められます", FAILED_BOOT_LIMIT_SEC // 60)
+        reason = srv.wait_until_stopped()
+        closer.cancel()
+        log.info("終了しました: %s", reason)
         return EXIT_ENV
     finally:
         launch_guard.remove_lock()

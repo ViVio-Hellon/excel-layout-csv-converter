@@ -14,6 +14,21 @@
 実行中の変換があるときは、既定では止めずに知らせます。中断してよいかは
 利用者が決めます(`--force` で中断します)。
 
+【止まったことを確かめてから言います】
+「終わってもらいました」と出たのに Python が残っていた、という報告が
+ありました。残っていると**そのフォルダを消せません**(配り直しは
+フォルダを置き換えるので、ここで詰まります)。そこで:
+
+- 言う前に確かめます。残っていれば**残っていると言い、終了コードも
+  0 にしません**(`stop.bat` が次の手を出せます)
+- 答えないとき(起動の途中で固まった、など)も「触りません」で
+  終わらせず、**控えていたPIDの道**へ進みます
+- **止まったと確かめるまで目印を消しません** ── 消すとPIDの控えが
+  無くなり、次に打っても手がかりがありません
+
+待機画面(本体を組み立てる前)も、いまは止める合図に答えます
+(`boot_server.BootApp.shutdown`)。
+
 使い方:
 
     python process_manager.py            止める
@@ -49,10 +64,23 @@ def status() -> int:
         screen = health.get("screen") or {}
         job = health.get("job") or {}
         print(f"起動しています: PID {health.get('pid')} / {found.url}")
+        if not health.get("ready"):
+            # **ここが分かれ目です。** 本体を組み立てられず、理由の画面
+            # だけが残っていることがあります(そのままではフォルダを
+            # 消せません)。何が起きているかを先に言います
+            print(f"  状態        : まだ準備できていません"
+                  f"({health.get('stage') or '起動中'})")
+            if health.get("startup_error"):
+                print(f"  起動の失敗  : {health['startup_error']}")
+                print("  → stop.bat で止められます")
         print(f"  画面        : {'開いています' if screen.get('busy') else '開いていません'}")
         print(f"  変換        : {job.get('state')}")
         return 0
     print({launch_guard.FREE: "起動していません"}.get(found.state, found.detail))
+    lock = launch_guard.read_lock()
+    if found.state != launch_guard.FREE and lock and lock.pid:
+        print(f"  控えている PID: {lock.pid}"
+              f"({launch_guard.lock_path()})")
     return 0
 
 
@@ -83,12 +111,65 @@ def _ask(question: str) -> bool:
         return False
 
 
+def _stop_recorded(pid: int) -> int:
+    """答えない相手を、控えていたPIDで止める。**確かめてから言います。**
+
+    `stop.bat` が「終わってもらいました」と言ったのに Python が残っていた、
+    という報告がありました。言う前に確かめ、残っていれば**残っていると
+    言います**(そのままではフォルダを消せないので、次の手が要ります)。
+
+    **止まったと確かめるまで目印(`instance.json`)は消しません。** 消すと
+    PIDの控えが無くなり、次に `stop.bat` を打っても手がかりがありません。
+    """
+    if not pid:
+        print("  控えている PID がありません"
+              f"({launch_guard.lock_path()} が無い、または壊れています)。"
+              "\n  タスクマネージャーで python.exe を確かめてください")
+        return 1
+    if not _looks_like_our_process(pid):
+        print(f"  PID {pid} がこのアプリのものだと確かめられませんでした。"
+              "\n  巻き添えを避けるため、強制終了はしません。"
+              f"\n  タスクマネージャーで PID {pid} を確かめてください。")
+        return 1
+    print(f"  控えていた PID {pid} で終了させます")
+    subprocess.run(["taskkill", "/PID", str(pid), "/F"], check=False)
+    time.sleep(1.0)
+    if _looks_like_our_process(pid) or _still_running():
+        print(f"まだ残っています(PID {pid})。"
+              "\n  タスクマネージャーで終了させてください"
+              "(残っているあいだは、このフォルダを消せません)。")
+        return 1
+    launch_guard.remove_lock()
+    print("止まりました。")
+    return 0
+
+
 def stop(*, force: bool = False, timeout: float = WAIT_SEC) -> int:
     found = launch_guard.check_existing()
-    if found.state != launch_guard.OURS:
-        print({launch_guard.FREE: "起動していません(止めるものはありません)",
-               }.get(found.state, found.detail + " ── 触りません"))
+
+    if found.state == launch_guard.FREE:
+        print("起動していません(止めるものはありません)")
         launch_guard.remove_lock()
+        return 0
+
+    if found.state != launch_guard.OURS:
+        # ポートは使われているのに、うちだと確かめられない。
+        # **「触りません」で終わらせません** ── 起動の途中で固まった
+        # ときもここへ来ます(そのまま残るとフォルダを消せません)
+        lock = found.lock or launch_guard.read_lock()
+        recorded = int(lock.pid) if lock and lock.pid else 0
+        print(found.detail)
+        if found.state == launch_guard.UNKNOWN:
+            print("  答えないので、控えていた目印で止めます"
+                  "(起動の途中で固まるとこうなります)")
+            return _stop_recorded(recorded)
+        # 別のアプリがポートを使っている。**そちらは触りません**
+        print("  別のアプリなので触りません。"
+              "config/app.json の server.port を確かめてください")
+        if recorded and _looks_like_our_process(recorded):
+            print(f"  ただし、控えていた PID {recorded} はまだ居ます ── "
+                  "こちらは止まっていません")
+            return 1
         return 0
 
     lock = found.lock or launch_guard.read_lock()
@@ -96,7 +177,13 @@ def stop(*, force: bool = False, timeout: float = WAIT_SEC) -> int:
     stop_key = lock.stop_key if lock else ""
     pid = int(found.pid or (lock.pid if lock else 0))
     port = int((found.health.get("port") or app_config.port()))
+    ready = bool(found.health.get("ready"))
     print(f"止めます: PID {pid} / {found.url}")
+    if not ready:
+        print("  まだ準備できていません"
+              f"({found.health.get('stage') or '起動中'})"
+              + (f" ── 起動の失敗: {found.health['startup_error']}"
+                 if found.health.get("startup_error") else ""))
 
     # 1. まず本人へ頼む
     code, answer = launch_guard.request_shutdown(port, token, stop_key=stop_key,
@@ -111,6 +198,13 @@ def stop(*, force: bool = False, timeout: float = WAIT_SEC) -> int:
     if code in (401, 403):
         print("停止を断られました(出どころを確かめられませんでした)。"
               f"\n  {launch_guard.lock_path()} を読める利用者で実行してください")
+    elif code == 503:
+        # この版より古い待機画面は、止める合図に答えません(そのときは
+        # 下のPIDの道で止めます)。**黙って20秒待つより、言います**
+        print("  起動中の画面が『まだです』と答えました"
+              "(古い版の待機画面は止める合図に答えません)")
+    elif code == 0:
+        print(f"  返事がありません: {answer.get('detail', '')}")
 
     # 2. 終わるのを待つ
     limit = time.time() + timeout
@@ -123,17 +217,7 @@ def stop(*, force: bool = False, timeout: float = WAIT_SEC) -> int:
 
     # 3. それでも残っていたら、控えたPIDだけを撃つ
     print("応答がありません。控えていたPIDで終了させます。")
-    if not _looks_like_our_process(pid):
-        print(f"  PID {pid} がこのアプリのものだと確かめられませんでした。"
-              "\n  巻き添えを避けるため、強制終了はしません。"
-              f"\n  タスクマネージャーで PID {pid} を確かめてください。")
-        return 1
-    subprocess.run(["taskkill", "/PID", str(pid), "/F"], check=False)
-    time.sleep(1.0)
-    launch_guard.remove_lock()
-    alive = _still_running()
-    print("終了させました。" if not alive else "まだ残っています。")
-    return 1 if alive else 0
+    return _stop_recorded(pid)
 
 
 def main(argv: Optional[list] = None) -> int:

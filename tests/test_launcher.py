@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -19,6 +21,7 @@ from tests._isolation import ensure_isolated       # noqa: E402
 ensure_isolated()
 
 import launch_guard                                # noqa: E402
+import process_manager                             # noqa: E402
 import start_app                                   # noqa: E402
 from converter import app_config                   # noqa: E402
 from tests._web import WebCase                     # noqa: E402
@@ -78,6 +81,70 @@ class GuardTests(WebCase):
         launch_guard.write_lock(launch_guard.new_lock(port=8741, token="古い"))
         self.assertEqual(launch_guard.check_existing().state, launch_guard.FREE)
         self.assertIsNone(launch_guard.read_lock())
+
+
+class StopTests(WebCase):
+    """`stop.bat` の中身(`process_manager`)。
+
+    **止まったと確かめてから言います。** 「終わってもらいました」と出た
+    のに Python が残っていた、という報告がありました ── 残っていると
+    そのフォルダを消せないので、確かめずに成功と言ってはいけません。
+    """
+
+    def test_起動していなければ止めるものはない(self) -> None:
+        self.assertEqual(process_manager.stop(), 0)
+
+    def test_答えない相手を成功と言わない(self) -> None:
+        """ポートは受け付けるのに health が答えない(起動の途中で固まった)。
+
+        前は「何のアプリか答えません ── 触りません」と言って**0を返し**、
+        目印まで消していました。`stop.bat` は成功と見なし、Python は
+        残ったままでした。
+        """
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((app_config.host(), app_config.port()))
+        listener.listen(5)                         # 受け付けるが答えない
+        self.addCleanup(listener.close)
+        launch_guard.write_lock(launch_guard.new_lock(port=app_config.port(),
+                                                      token="t", stop_key="s"))
+        self.addCleanup(launch_guard.remove_lock)
+
+        code = process_manager.stop()
+        self.assertNotEqual(code, 0)               # stop.bat が次の手を出せる
+        # **PIDの控えを捨てません** ── 捨てると次に打っても手がかりが無い
+        self.assertIsNotNone(launch_guard.read_lock())
+
+    def test_撃ったあと残っていれば残っていると言う(self) -> None:
+        launch_guard.write_lock(launch_guard.new_lock(port=app_config.port(),
+                                                      token="t", stop_key="s"))
+        self.addCleanup(launch_guard.remove_lock)
+        with mock.patch.object(process_manager, "_looks_like_our_process",
+                               return_value=True), \
+             mock.patch.object(process_manager.subprocess, "run"), \
+             mock.patch.object(process_manager, "_still_running",
+                               return_value=True), \
+             mock.patch.object(process_manager.time, "sleep"):
+            code = process_manager._stop_recorded(12345)
+        self.assertEqual(code, 1)
+        self.assertIsNotNone(launch_guard.read_lock())
+
+    def test_止まったと確かめたら目印を消す(self) -> None:
+        launch_guard.write_lock(launch_guard.new_lock(port=app_config.port(),
+                                                      token="t", stop_key="s"))
+        with mock.patch.object(process_manager, "_looks_like_our_process",
+                               side_effect=[True, False]), \
+             mock.patch.object(process_manager.subprocess, "run"), \
+             mock.patch.object(process_manager, "_still_running",
+                               return_value=False), \
+             mock.patch.object(process_manager.time, "sleep"):
+            code = process_manager._stop_recorded(12345)
+        self.assertEqual(code, 0)
+        self.assertIsNone(launch_guard.read_lock())
+
+    def test_控えが無ければ撃たない(self) -> None:
+        """**巻き添えを避けます。** PIDが分からなければ何もしません。"""
+        self.assertEqual(process_manager._stop_recorded(0), 1)
 
 
 class EnvironmentTests(unittest.TestCase):

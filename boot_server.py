@@ -5,10 +5,11 @@
 読み込みです。そのあとに待機画面を出していたら、「待たせるために見せる
 もの」を待たせていることになります ── 出す意味がありません。
 
-そこで、待ち受けだけを先に始めます。ここが答えるのは2つだけ:
+そこで、待ち受けだけを先に始めます。ここが答えるのは3つだけ:
 
-    GET /             待機画面(1往復で出る。外部への要求は無し)
-    GET /api/health   まだ準備できていないことを、本体と**同じ形**で返す
+    GET  /             待機画面(1往復で出る。外部への要求は無し)
+    GET  /api/health   まだ準備できていないことを、本体と**同じ形**で返す
+    POST /api/shutdown 止める合図に答える。**本体ができる前でも止まります**
 
 読み込むのは `converter.app_config` と `converter.boot_screen` だけです
 (業務のモジュールも、変換も読みません)。
@@ -46,13 +47,17 @@ class BootApp:
     と同じ役目を、本体ができる前の時間帯だけ引き受けます)。
     """
 
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int, *, stop_key: str = "") -> None:
         self.port = port
         self.stage = "実行環境を確認中"
         self.stage_key = "environment"
         self.startup_error = ""
         self.started_at = time.time()
         self._page: Optional[str] = None
+        #: 止める合図。**本体と同じもの**を渡します(`start_app`)
+        self.stop_key = stop_key
+        #: 止めてと言われたときに呼ぶ先(`server.AppServer.request_stop`)
+        self.shutdown_hook: Optional[Any] = None
 
     # -- 状態 -------------------------------------------------------
     def mark_stage(self, stage: str, key: str = "prepare") -> None:
@@ -97,11 +102,48 @@ class BootApp:
             "job": None,
         }
 
+    # -- 止める -----------------------------------------------------
+    def shutdown(self, request: Request) -> Response:
+        """**待機画面でも、止める合図には答えます。**
+
+        【なぜ要るのか】
+        本体を組み立てられなかったとき(フォルダが欠けた・設定が壊れた・
+        部品が無い)、このアプリは**待機画面に理由を出したまま残ります** ──
+        理由を読めるようにするためです。ところがここが止める合図に答えて
+        いないと、`stop.bat` でも `--force` でも止まらず、Python が残って
+        **フォルダを消せなくなります**(タスクマネージャーで切るしかない)。
+        実際にそうなった報告があり、ここで答えるようにしました。
+
+        通すのは**停止の合図**(`runtime/instance.json` の `stop_key`)を
+        持ってきた相手だけです ── 本体の `POST /api/shutdown` と同じ鍵で、
+        起動トークンでは通しません(あれは画面のHTMLにも入ります)。
+        画面の持ち主による停止は見ません: 本体がまだ無いので、画面の
+        占有そのものがありません。
+
+        **実行中かどうかは確かめません。** 本体ができていないので、
+        変換は始められません(止めて失うものがない)。
+        """
+        payload = request.json()
+        key = str(payload.get("stop_key", "")) or request.header("x-stop-key")
+        if not (self.stop_key and key == self.stop_key):
+            log.warning("停止を断りました(合図が合いません)")
+            return json_response(
+                {"ok": False, "reason": "停止できません",
+                 "detail": "この操作の出どころを確かめられません。"
+                           "同じ端末の stop.bat から止めてください"},
+                status=403)
+        log.info("停止を受け付けました(stop.bat ── まだ待機画面です)")
+        if self.shutdown_hook is not None:
+            self.shutdown_hook("stop.bat から停止を頼まれました(待機画面)")
+        return json_response({"ok": True, "ready": False})
+
     # -- 受付 -------------------------------------------------------
     def dispatch(self, request: Request) -> Response:
         if request.path == "/api/health":
             return json_response(self.health(),
                                  **{"Cache-Control": "no-store"})
+        if request.path == "/api/shutdown" and request.method == "POST":
+            return self.shutdown(request)
         if request.path in ("/", ""):
             return html_response(self.page())
         return json_response(_NOT_READY, status=503)
