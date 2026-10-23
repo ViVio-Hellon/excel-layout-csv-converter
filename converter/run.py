@@ -150,7 +150,7 @@ def convert(inputs, out_dir, *, line: str = "", dry_run: bool = False,
     `dry_run` なら**CSVを1本も書きません** ── 読めるか・数が合うかだけ見ます。
 
     `tag` は仕事の番号(画面から来たときの `job.id`)。**ログの各行に付きます**
-    ので、あとから `error.log` で時刻と番号を拾い、その番号で `app.log` を
+    ので、あとから `_error.log` で時刻と番号を拾い、その番号で `_app.log` を
     追えば同じ仕事の筋道が頭から並びます。
     """
     from nippou.db import connection

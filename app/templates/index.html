@@ -75,8 +75,13 @@
                placeholder="空ならこの端末の中(ログを開く で見られます)">
         <span class="hint" id="hint-log_dir"></span>
         <span class="hint">共有へ集めたいときに指定します。
-          <code>app.log</code>(筋道)/<code>error.log</code>(うまくいかなかった
-          ことだけ)/<code>launcher.log</code>(起動)の3本が出ます。
+          <b>指した先にツール名のフォルダを作り、その中へ出します</b> ──
+          ほかのツールのログと混ざらないように、
+          <b>ファイル名もツール名から始めます</b>(1本取り出したときに、
+          開かなくても分かるように)。
+          <code>&lt;指した先&gt;\ExcelCsvConverter\ExcelCsvConverter_app.log</code>
+          (筋道)/<code>_error.log</code>(うまくいかなかったことだけ)/
+          <code>_launcher.log</code>(起動)の3本です。
           書けない場所ならこの端末の中へ戻し、その理由も残します。</span>
       </label>
     </div>

@@ -110,6 +110,15 @@ def main(argv=None) -> int:
                         help="内部のログも出します(調べるとき)")
     args = parser.parse_args(argv)
 
+    # **設定の「ログの置き場所」は、コマンドからでも効かせます** ──
+    # 画面では共有へ出るのにコマンドでは端末の中、という食い違いを作らない
+    # ため(書けなければ端末の中へ戻し、その理由も残します)
+    from converter import logging_utils, user_settings
+
+    refused = logging_utils.use_folder(user_settings.load().log_dir)
+    if refused:
+        print(refused, file=sys.stderr)
+
     # **nippou を読み込む前に決めます** ── 置き場所は読み込み時に固まります
     if args.ref:
         os.environ["NIPPOU_GW_REF_DIR"] = str(Path(args.ref).expanduser())

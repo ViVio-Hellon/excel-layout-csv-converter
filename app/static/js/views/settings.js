@@ -38,7 +38,11 @@ function show(data) {
     const hint = $("hint-" + item.key);
     if (!hint) { return; }
     if (!item.text) { hint.textContent = ""; hint.className = "hint"; return; }
-    hint.textContent = item.resolved + (item.note ? " ── " + item.note : "");
+    // ログは**実際に書いている場所**を出します(指した先の下に、ツール名の
+    // フォルダを1つ作って出すので、指した道のままではありません)
+    const where = (item.key === "log_dir" && data.logs && data.logs.folder)
+      ? data.logs.folder : item.resolved;
+    hint.textContent = where + (item.note ? " ── " + item.note : "");
     hint.className = "hint " + (item.exists ? "ok" : (item.note ? "bad" : ""));
   });
 }

@@ -6,14 +6,26 @@
 変換で失敗したのか ── これが区別できないと、聞き取りから始めることに
 なります。
 
-    launcher.log  起動入口(環境の確認・多重起動の判定・待機画面・終了理由)
-    app.log       アプリ本体(画面の操作・変換の筋道・1本ごとの結果)
-    error.log     **うまくいかなかったことだけ**(警告以上。例外は中身つき)
+    <ツール名>_launcher.log  起動入口(環境の確認・多重起動の判定・終了理由)
+    <ツール名>_app.log       アプリ本体(画面の操作・変換の筋道・1本ごとの結果)
+    <ツール名>_error.log     **うまくいかなかったことだけ**(警告以上。中身つき)
 
 **細かく分けすぎない**のも仕様書の指示です。3本目は「分類」ではなく
-**入口**です ── あとから追うとき、まず `error.log` を開いて時刻と仕事の
-番号(`[job=ab12cd34]`)を拾い、その番号で `app.log` を追えば、同じ仕事の
+**入口**です ── あとから追うとき、まず `_error.log` を開いて時刻と仕事の
+番号(`[job=ab12cd34]`)を拾い、その番号で `_app.log` を追えば、同じ仕事の
 筋道が頭から終わりまで並んでいます。
+
+【なぜ名前とフォルダの両方にツール名を入れるのか】
+共有の掃き出し先には**いろいろなツールのログが集まります**。
+
+    \\共有\ログ\ExcelCsvConverter\ExcelCsvConverter_app.log
+                  dbviewer\…
+                  rneconverter\…
+
+フォルダだけで分けると、**1本取り出した時点でどのツールのものか分から
+なくなります**(開くまで分からない)。名前だけに入れると、同じ場所に
+何十本も並びます。だから両方に入れます ── 現場の言葉で
+「取り出したとき結局開かないとわからなくなるため」。
 
 【なぜなぜ分析ができる書き方】
 1行ずつ「いつ・どの仕事の・何本目の・どのファイルで・何をして・どうだった」
@@ -38,8 +50,8 @@
 【使い方】
 
     from converter.logging_utils import get_logger
-    log = get_logger("jobs")          # → app.log
-    log = get_logger("launcher")      # → launcher.log
+    log = get_logger("jobs")          # → <ツール名>_app.log
+    log = get_logger("launcher")      # → <ツール名>_launcher.log
 """
 from __future__ import annotations
 
@@ -55,12 +67,14 @@ from . import app_config
 MAX_BYTES = 2 * 1024 * 1024
 BACKUPS = 5
 
-#: うまくいかなかったことだけを集める1本。**追うときの入口**
-ERROR_FILE = "error.log"
+#: ログの種類。**ファイル名はこれにツール名を足して作ります**
+APP_LOG = "app"
+ERROR_LOG = "error"            # うまくいかなかったことだけ。**追うときの入口**
+LAUNCHER_LOG = "launcher"
 
 _FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 
-#: 起動入口のログへ入れる名前。**ここに挙がっていないものは app.log**
+#: 起動入口のログへ入れる名前。**ここに挙がっていないものは _app.log**
 LAUNCHER_NAMES = frozenset({"launcher", "guard", "process_manager"})
 
 #: 名前の前に付ける。他のアプリのロガーと混ざらないようにする
@@ -76,8 +90,28 @@ _note = ""
 
 
 def folder() -> Path:
-    """いまログを書いている場所。"""
+    """いまログを書いている場所。**ツール名のフォルダまで**を返します。
+
+    指した先が共有なら `<指した先>\<ツール名>\` です(`use_folder` が
+    作ります)。空のときは端末のローカル領域
+    `%LOCALAPPDATA%\<ツール名>\logs` ── こちらは**上の階層が既に
+    ツール名**なので、重ねません。
+    """
     return _folder or app_config.local_dir("logs")
+
+
+def tool_name() -> str:
+    """ログに入れるツール名(`config/app.json` の `log_name`)。"""
+    return app_config.log_name()
+
+
+def file_name(kind: str) -> str:
+    """ログのファイル名。**名前の作り方はここ1か所。**
+
+    `ExcelCsvConverter_app.log` のように、**必ずツール名から始めます** ──
+    共有に集めたログを1本取り出したとき、開かなくても分かるように。
+    """
+    return f"{tool_name()}_{kind}.log"
 
 
 def note() -> str:
@@ -102,7 +136,14 @@ def use_folder(text: str) -> str:
             path = Path(want).expanduser()
             if not path.is_absolute():
                 path = app_config.APP_ROOT / path
+            # **ツール名のフォルダを1つ作って、その中へ出します** ──
+            # 共有の掃き出し先は何本ものツールで共用されます。
+            # 指した先が既にツール名なら重ねません
+            if path.name != tool_name():
+                path = path / tool_name()
             path.mkdir(parents=True, exist_ok=True)
+            # 試すのは**実際に書く場所**です(親だけ試すと、作った
+            # フォルダに書けないときに気づけません)
             probe = path / ".write-test"
             probe.write_text("", encoding="utf-8")
             probe.unlink()
@@ -145,9 +186,9 @@ def use_console(enabled: bool = True) -> None:
 
 
 def log_file(name: str) -> Path:
-    """その名前が書き込む先。**名前の作り方はここ1か所。**"""
-    target = "launcher.log" if name in LAUNCHER_NAMES else "app.log"
-    return folder() / target
+    """その名前が書き込む先。"""
+    kind = LAUNCHER_LOG if name in LAUNCHER_NAMES else APP_LOG
+    return folder() / file_name(kind)
 
 
 def get_logger(name: str, *, level: int = logging.INFO) -> logging.Logger:
@@ -162,9 +203,9 @@ def get_logger(name: str, *, level: int = logging.INFO) -> logging.Logger:
 
 
 def _attach_files(logger: logging.Logger, name: str) -> None:
-    """その名前のログ(と `error.log`)を結ぶ。**二重には結びません。**"""
+    """その名前のログ(と `_error.log`)を結ぶ。**二重には結びません。**"""
     for path, least in ((log_file(name), logging.NOTSET),
-                        (folder() / ERROR_FILE, logging.WARNING)):
+                        (folder() / file_name(ERROR_LOG), logging.WARNING)):
         if any(getattr(h, "_xlcsv_path", None) == str(path)
                for h in logger.handlers):
             continue
@@ -207,9 +248,10 @@ def log_paths() -> dict[str, str]:
     where = folder()
     return {
         "folder": str(where),
-        "launcher": str(where / "launcher.log"),
-        "app": str(where / "app.log"),
-        "error": str(where / ERROR_FILE),
+        "tool": tool_name(),
+        "launcher": str(where / file_name(LAUNCHER_LOG)),
+        "app": str(where / file_name(APP_LOG)),
+        "error": str(where / file_name(ERROR_LOG)),
         "note": _note,
         "default": str(app_config.local_dir("logs")),
     }

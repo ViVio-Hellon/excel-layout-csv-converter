@@ -14,7 +14,7 @@ r"""アプリ固有値の唯一の出どころ(`config/app.json` の読み取り
 
     %LOCALAPPDATA%\ExcelCsvConverter\
       runtime\ … PID・ポート・待機画面(停止後は消してよい)
-      logs\    … launcher.log / guard.log / app.log
+      logs\    … <ツール名>_launcher.log / _app.log / _error.log
       pycache\ … 読込キャッシュ(アプリ本体が共有配置でも汚さない)
       cache\   … 再取得できるもの
       work\    … ドラッグで受け取ったブックなど一時のもの
@@ -120,6 +120,27 @@ def app_id() -> str:
 
 def display_name() -> str:
     return str(load()["display_name"])
+
+
+#: ファイル名・フォルダ名に使えない字。**区切り文字は落とします**
+_UNSAFE_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f\s]+')
+
+
+def log_name() -> str:
+    """ログに付けるツール名。**ファイル名とフォルダ名の両方に入ります。**
+
+    共有の掃き出し先には**いろいろなツールのログが集まります**
+    (`dbviewer` `rneconverter` `nippou` …)。`app.log` のような名前だと、
+    取り出したあと**開くまでどのツールのものか分かりません**。そこで
+    名前にツール名を入れ、さらにツール名のフォルダを作ってその中へ出します。
+
+    出どころは `config/app.json` の `log_name`(無ければ
+    `local_dir_name`)── 現場の呼び名に合わせて変えられるようにして
+    あります。区切り文字は落とします(名前で上の階層へ出られないように)。
+    """
+    found = load()
+    text = str(found.get("log_name") or found["local_dir_name"]).strip()
+    return _UNSAFE_NAME.sub("_", text).strip("._") or "app"
 
 
 _VERSION_FORM = re.compile(r"^\d+\.\d+\.\d+$")

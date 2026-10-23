@@ -177,9 +177,12 @@ class LogSettingTests(WebCase):
         screen_id = self.claim()
         where = self.tmp / "共有ログ"
         data = self.settings(screen_id, log_dir=str(where))
-        self.assertEqual(data["logs"]["folder"], str(where))
-        self.assertEqual(logging_utils.folder(), where)
-        self.assertTrue((where / "app.log").is_file())
+        # **指した先にツール名のフォルダを作り、その中へ出します** ──
+        # 共有の掃き出し先は何本ものツールで共用されるので
+        tool = logging_utils.tool_name()
+        self.assertEqual(data["logs"]["folder"], str(where / tool))
+        self.assertEqual(logging_utils.folder(), where / tool)
+        self.assertTrue((where / tool / f"{tool}_app.log").is_file())
 
     def test_どこを指しているか返す(self) -> None:
         screen_id = self.claim()
