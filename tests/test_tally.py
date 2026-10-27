@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vendor"))
@@ -573,6 +574,61 @@ class 変換が出したCSVを読む(Base):
         self.assertEqual(self.stop_of(found.rows[0], 2), ("タ", "30"))
         self.assertIn("記号のまま", found.summary())
         self.assertIn("タ", found.summary())
+
+    def stop_99(self, label: str = "", **row) -> dict:
+        made = {"日付": "2026年8月23日", "ライン": "LS", "直": "1直",
+                "区分": "1件ずつ", "分類": "管理ロス設備停止", "記号": "99",
+                "内訳": label, "ページ": "1", "行": "1",
+                "停止の位置": "作業停止①", "回数": "1", "停止時間(分)": "30"}
+        made.update(row)
+        return made
+
+    def test_名前の空の99は名前を空のまま内訳1に入れる(self) -> None:
+        """**分類1・内訳番号99 は名前が空でよい記号**(日報管理ツールの決まり)。
+
+        隠しません ── 時間は内訳-1 に入れ、名前の欄が空になるだけです。
+        知らせは「記号のまま入れました」ではなく、件数と分の1行です。
+        """
+        detail = self.detail_csv([
+            self.detail_row(D="L1", L="9", AJ="99", AK="30", AL="0", AM="45"),
+            self.detail_row(row_no="2", D="L2", L="9", AJ="99", AK="15"),
+        ])
+        stops = self.stops_csv([self.stop_99(),
+                                self.stop_99(行="2", **{"停止時間(分)": "15"})])
+        found = tally.build([detail, stops])
+        self.assertEqual(len(found.rows), 3, found.sheets[0].skipped)
+        firsts = [self.stop_of(row, 1) for row in found.rows]
+        self.assertEqual(firsts, [("", "30"), ("0", "45"), ("", "15")])
+        text = found.summary()
+        self.assertIn("内訳番号99(名前なし) 2件・45分", text)
+        self.assertNotIn("記号のまま入れました: 99", text)
+
+    def test_停止内訳CSVが無くても99は名前なし(self) -> None:
+        found = tally.build([self.detail_csv(
+            [self.detail_row(D="L1", L="9", AJ="99", AK="30")])])
+        self.assertEqual(self.stop_of(found.rows[0], 1), ("", "30"))
+        self.assertIn("内訳番号99(名前なし) 1件・30分", found.summary())
+        self.assertNotIn("記号のまま", found.summary())
+
+    def test_その日が空ならマスタの名前で埋めない(self) -> None:
+        """その日の停止内訳で空だった 99 に、設定部のマスタの名前を入れません。"""
+        detail = self.detail_csv([self.detail_row(D="L1", L="9", AJ="99", AK="30")])
+        stops = self.stops_csv([self.stop_99()])
+        with patch.object(tally, "master_names", return_value={"99": "昔の名前"}):
+            found = tally.build([detail, stops])
+        self.assertEqual(self.stop_of(found.rows[0], 1), ("", "30"))
+
+    def test_99に名前があれば名前で入る(self) -> None:
+        detail = self.detail_csv([self.detail_row(D="L1", L="9", AJ="99", AK="30")])
+        found = tally.build([detail, self.stops_csv([self.stop_99("その他停止")])])
+        self.assertEqual(self.stop_of(found.rows[0], 1), ("その他停止", "30"))
+        self.assertNotIn("名前なし", found.summary())
+
+    def test_99のほかの名前の無い記号は今までどおり記号のまま(self) -> None:
+        found = tally.build([self.detail_csv(
+            [self.detail_row(D="L1", L="9", AJ="98", AK="30")])])
+        self.assertEqual(self.stop_of(found.rows[0], 1), ("98", "30"))
+        self.assertIn("記号のまま入れました: 98", found.summary())
 
     def test_作業停止の4つめ5つめも読む(self) -> None:
         """**枠は①〜⑤まで見ます。**

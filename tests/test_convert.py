@@ -289,6 +289,42 @@ class StopNameTests(unittest.TestCase):
         self.assertTrue(ok, text)
         self.assertIn("3記号", text)
 
+    def read_status(self, text: str):
+        from converter import stop_reasons, user_settings
+
+        folder = self.tmp / "停止"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "停止内訳.csv").write_text(text, encoding="utf-8-sig")
+        user_settings.apply_to_vendor(
+            user_settings.Settings(stop_csv=str(folder)))
+        return stop_reasons.read()
+
+    def test_名前の空の99は直せと言わない(self) -> None:
+        """**分類1・内訳番号99 だけは名前が空でよい**(日報管理ツールの決まり)。
+
+        写し(v3.96.0)はこの行を「内訳(理由の名前)がありません」と言って
+        捨てるので、変換のたびに直せと言われていました。
+        """
+        for row in ("1,99,,", "1,99", "1,99,", "1,９９,,", "設備停止,99,,"):
+            with self.subTest(row=row):
+                status = self.read_status(self.CSV + row + "\r\n")
+                self.assertTrue(status.ok, status.text())
+                self.assertEqual(status.problems, [])
+                self.assertNotIn("直すところ", status.text())
+
+    def test_ほかの名前の空は今までどおり言う(self) -> None:
+        """空でよいのは**分類1 の 99 だけ**です(2 の 99・1 の 98 は言います)。"""
+        for row in ("2,99,,", "1,98,,", "3,99,,"):
+            with self.subTest(row=row):
+                status = self.read_status(self.CSV + row + "\r\n")
+                self.assertEqual(len(status.problems), 1, status.problems)
+                self.assertIn("直すところ", status.text())
+
+    def test_名前の空の99があっても変換の内訳は空で出る(self) -> None:
+        rows = self.convert_with_csv(self.CSV + "1,99,,\r\n")
+        names = {row["記号"]: row["内訳"] for row in rows}
+        self.assertEqual(names.get("0"), "休憩食事")      # ほかの行は今までどおり
+
 
 class VerifyTests(unittest.TestCase):
     """検算 ── **座標が合っていたかを、シート自身の合計で確かめる。**"""

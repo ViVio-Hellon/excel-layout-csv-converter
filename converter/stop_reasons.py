@@ -35,11 +35,52 @@ CSVに `1` の行しか無ければ `2` と `3` は表のままです。
 """
 from __future__ import annotations
 
+import csv
+import unicodedata
 from dataclasses import dataclass, field
 
 #: CSVの書き方の見本。画面と `読み方.txt` に出します
 SAMPLE = ("分類,内訳番号,内訳,備考", "1,0,休憩食事,", "2,イ,突発停止(機械),",
           "3,A,段取り変更,")
+
+#: **名前(内訳)が空でよい記号**(分類1 の内訳番号)。日報管理ツール v4.44.13 の
+#: `stop_csv.BLANK_LABEL_OK`(分類1・内訳番号99)と同じ決まりです。
+#:
+#: 写し(`vendor/`)は v3.96.0 でこの決まりを持たないので、**写しは直さずに**
+#: ここで持ちます(VENDOR.md の約束)。写しを採り直したら、写しの
+#: `stop_csv.blank_label_ok` を呼ぶだけに戻せます。
+#:
+#: 名前が空の 99 は**隠しません** ── 時間は今までどおり数え、名前の欄が空に
+#: なるだけです。知らせも「記号のまま入れました」の代わりに件数と分を1行出します。
+BLANK_NAME_CODES: frozenset[str] = frozenset({"99"})
+
+
+def blank_name_ok(code: str) -> bool:
+    """名前(内訳)が空でよい記号か。全角の `９９` も同じに見ます。"""
+    return (unicodedata.normalize("NFKC", str(code or "")).strip()
+            in BLANK_NAME_CODES)
+
+
+def blank_name_row(text: str) -> bool:
+    """停止内訳CSVの1行が `1,99,,` / `1,99`(名前の空でよい行)か。
+
+    写しの `stop_csv.parse` はこの行を「内訳(理由の名前)がありません」
+    (`1,99` だけなら「欄が足りません」)と言って捨てます。捨てても名前は
+    空のままなので出すCSVは同じですが、**変換のたびに直せと言われる**のを
+    止めます。
+    """
+    from nippou.logic import stop_csv
+
+    delimiter = "," if "," in text or "\t" not in text else "\t"
+    try:
+        cells = [cell.strip() for cell in next(csv.reader([text], delimiter=delimiter))]
+    except (csv.Error, StopIteration):
+        return False
+    if len(cells) < 2 or not blank_name_ok(cells[1]):
+        return False
+    if len(cells) > 2 and cells[2]:
+        return False                              # 名前があるなら、ほかの理由
+    return stop_csv.category_of(cells[0]) == stop_csv.CATEGORY_NAMES[0]
 
 
 @dataclass
@@ -112,8 +153,10 @@ def read() -> Status:
     status.csv_exists = bool(found.csv_exists)
     status.csv_error = str(found.csv_error or "")
     status.origins = dict(found.origins)
+    # `1,99,,` は日報管理ツールの決まりで正しい行なので、直せとは言いません
     status.problems = [f"{p.line_no}行目: {p.reason}"
-                       for p in found.csv.problems]
+                       for p in found.csv.problems
+                       if not blank_name_row(p.text)]
     codes = {reason.code for items in found.effective.values()
              for reason in items if reason.code}
     status.codes = len(codes)
