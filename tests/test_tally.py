@@ -718,6 +718,93 @@ class 変換が出したCSVを読む(Base):
             with self.subTest(name=name):
                 self.assertEqual(tally.csv_kind(list(fields)), name)
         self.assertEqual(tally.csv_kind(["あ", "い"]), "")
+        # **年月のフォルダに1つ置かれる式の説明**(移行元 4.2.0 から)
+        self.assertEqual(tally.csv_kind(list(tally.GUIDE_FIELDNAMES)),
+                         tally.GUIDE_CSV)
+
+
+class 移行元が列を足しても読める(Base):
+    """**向こうがCSVに列を足しても、こちらは読めること。**
+
+    日報管理ツールは**いちばん後ろに足す**ことにしています ── 前からある
+    列の位置を動かさないためです(位置で読んでいる表やマクロを壊さない)。
+    こちらは**見出しの名前で探す**ので、足されたぶんは素通りします。
+
+    実際に向こうで足されたもの(4.41.0 時点。写しは v3.96.0):
+
+        集計明細 40 → 44列   作業停止④⑤の記号・時間(4.24.0)
+        停止内訳 14 → 15列   休憩の時刻(4.37.0)
+        計算内容             日ごとをやめ、**年月のフォルダに1つ**(4.2.0)
+    """
+
+    #: 向こうが足した列。**ここに書き写しているのは「足された」という
+    #: 事実の控え**で、拾い方は名前で探します(位置では読みません)
+    DETAIL_ADDED = ("作業停止④ 記号", "作業停止④ 時間(分)",
+                    "作業停止⑤ 記号", "作業停止⑤ 時間(分)")
+    STOP_ADDED = ("休憩の時刻",)
+
+    def _write(self, name: str, fields: list, rows: list) -> Path:
+        path = self.tmp / name
+        with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: v for k, v in row.items() if k in fields})
+        return path
+
+    def test_集計明細が44列でも見分けて読む(self) -> None:
+        from nippou.reporting import csv_export
+
+        fields = list(csv_export.DETAIL_FIELDNAMES) + list(self.DETAIL_ADDED)
+        self.assertEqual(tally.csv_kind(fields), tally.DETAIL_CSV)
+        row = {"日付": "2026年8月23日", "ライン": "LS", "直": "1直",
+               "ページ": "1", "行": "1", "ロット№": "L1",
+               "梱包作業時間 終了 時": "9", "作業時間(分)": "35",
+               "作業停止① 記号": "タ", "作業停止① 時間(分)": "30",
+               "作業停止④ 記号": "2", "作業停止④ 時間(分)": "15",
+               "作業停止⑤ 記号": "E", "作業停止⑤ 時間(分)": "25"}
+        found = tally.build([self._write("集計明細_2026-08-23_LS.csv",
+                                         fields, [row])])
+        self.assertEqual(len(found.rows), 1, found.sheets[0].skipped)
+        at = [i for i, n in enumerate(tally.HEADERS)
+              if n.startswith("作業停止内訳-")]
+        got = found.rows[0]
+        # **④⑤も読みます**(文字種で振り分けるので、位置は関係ありません)
+        self.assertEqual((got[at[0]], got[at[0] + 1]), ("2", "15"))
+        self.assertEqual((got[at[1]], got[at[1] + 1]), ("タ", "30"))
+        self.assertEqual((got[at[2]], got[at[2] + 1]), ("E", "25"))
+
+    def test_停止内訳が15列でも内訳名が引ける(self) -> None:
+        from nippou.reporting import csv_export
+
+        detail_fields = (list(csv_export.DETAIL_FIELDNAMES)
+                         + list(self.DETAIL_ADDED))
+        stop_fields = list(csv_export.STOP_FIELDNAMES) + list(self.STOP_ADDED)
+        self.assertEqual(tally.csv_kind(stop_fields), tally.STOPS_CSV)
+        detail = self._write("集計明細_2026-08-23_LS.csv", detail_fields, [{
+            "日付": "2026年8月23日", "ライン": "LS", "直": "1直",
+            "ページ": "1", "行": "1", "ロット№": "L1",
+            "梱包作業時間 終了 時": "9",
+            "作業停止① 記号": "0", "作業停止① 時間(分)": "60"}])
+        stops = self._write("停止内訳_2026-08-23_LS.csv", stop_fields, [{
+            "日付": "2026年8月23日", "ライン": "LS", "直": "1直",
+            "区分": "1件ずつ", "分類": "不稼働", "記号": "0",
+            "内訳": "休憩食事", "ページ": "1", "行": "1",
+            "停止の位置": "作業停止①", "回数": "1", "停止時間(分)": "60",
+            "休憩の時刻": "11:30〜12:30"}])
+        found = tally.build([detail, stops])
+        at = list(tally.HEADERS).index("作業停止内訳-1")
+        self.assertEqual(found.rows[0][at], "休憩食事")
+
+    def test_年月の計算内容は理由を言って飛ばす(self) -> None:
+        """日付フォルダの**上の階層ごと**入れると混ざってきます。"""
+        guide = self._write("計算内容.csv", list(tally.GUIDE_FIELDNAMES),
+                            [{"対象": "直ごと", "項目": "重量(t)",
+                              "式": "重量(kg) ÷ 1000", "注記": ""}])
+        found = tally.build([guide])
+        self.assertEqual(found.rows, [])
+        self.assertIn("式の控え", found.sheets[0].skipped)
+        self.assertNotIn("分かりません", found.sheets[0].skipped)
 
 
 class ライン別に分ける(Base):

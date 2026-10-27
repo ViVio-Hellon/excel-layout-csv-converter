@@ -581,6 +581,13 @@ def take_csv(path, *, grid=None, stops: "StopNames | None" = None
         result.note = ("停止の記号→内訳名として使いました"
                        "(集計の行は集計明細CSVかブックから拾います)")
         return [], result
+    if kind == GUIDE_CSV:
+        # 年月のフォルダに1つ置かれる式の説明(移行元 4.2.0 から)。
+        # 日付フォルダの上の階層ごと入れると混ざってくるので、**種類として
+        # 見分けて**理由を言います(「中身が分かりません」では調べに行く)
+        result.skipped = ("計算内容の説明(式の控え)です。数は入っていないので"
+                          "材料になりません ── 年月のフォルダに1つ置かれます")
+        return [], result
     if kind:
         result.skipped = (
             f"{kind}のCSVです。機側データ集計の材料になるのは"
@@ -614,6 +621,14 @@ DETAIL_CSV = "集計明細"
 STOPS_CSV = "停止内訳"
 DAY_CSV = "日ごとの集計"
 FORMULA_CSV = "計算内容"
+GUIDE_CSV = "計算内容の説明"
+
+#: 年月のフォルダに置かれる「計算内容.csv」の見出し(移行元 4.2.0 から)。
+#: 式の説明だけで数は入っていないので、**日ごとには出ません**。
+#: 写し(`vendor/`)が追いつくまでのあいだの控えで、向こうに
+#: `formula.GUIDE_FIELDNAMES` があればそちらを使います ── 書き写した側は
+#: **古くなるのが先**なので、あくまで控えとして持ちます
+GUIDE_FIELDNAMES: tuple[str, ...] = ("対象", "項目", "式", "注記")
 
 #: 停止3枠。シートは「内容(S/U/W)+時間(T/V/X)」ですが、集計明細CSVには
 #: **記号(AJ/AL/AN)+時間(AK/AM/AO)しかありません**。同じ枠として扱います
@@ -657,7 +672,9 @@ def csv_kind(head: list[str]) -> str:
     known = ((DETAIL_CSV, list(csv_export.DETAIL_FIELDNAMES)),
              (STOPS_CSV, list(csv_export.STOP_FIELDNAMES)),
              (DAY_CSV, list(csv_export.FIELDNAMES)),
-             (FORMULA_CSV, list(formula.CSV_FIELDNAMES)))
+             (FORMULA_CSV, list(formula.CSV_FIELDNAMES)),
+             (GUIDE_CSV, list(getattr(formula, "GUIDE_FIELDNAMES", None)
+                              or GUIDE_FIELDNAMES)))
     for name, fields in known:
         if head[:len(fields)] == fields:
             return name
