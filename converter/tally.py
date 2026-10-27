@@ -695,7 +695,13 @@ def stop_names(grid: list[list[str]]) -> StopNames:
     同じ記号でも、内訳名を付け替えた日があり得るので。見つからなければ
     記号だけで引きます。内訳名が空の行は入れません(変換したときに
     参照用マスタが読めていないとき)。
+
+    **ただし名前の空でよい記号(分類1・内訳番号99)は、空のまま入れます**
+    (`stop_reasons.blank_name_ok`)── その日は名前が空だったと覚えて、
+    設定部のマスタや前の日の名前で埋めません。
     """
+    from .stop_reasons import blank_name_ok
+
     if not grid:
         return {}
     head = grid[0]
@@ -709,7 +715,7 @@ def stop_names(grid: list[list[str]]) -> StopNames:
             line = list(line) + [""] * (len(head) - len(line))
         label = line[at["内訳"]].strip()
         code = line[at["記号"]].strip()
-        if not label or not code:
+        if not code or (not label and not blank_name_ok(code)):
             continue
         found.setdefault(("記号", code), label)
         where = line[at["停止の位置"]].strip()
@@ -769,6 +775,19 @@ def _slot_labels(at: dict, labels: dict) -> list[tuple[str, str, str]]:
     return found
 
 
+def _minutes(text: str) -> float:
+    """停止時間の欄 → 分。読めなければ 0(数えた件数のほうは残ります)。"""
+    try:
+        return float(str(text).replace(",", "").strip())
+    except ValueError:
+        return 0.0
+
+
+def _minutes_text(value: float) -> str:
+    """`45.0` → `45`、`2.5` → `2.5`(知らせに出す形)。"""
+    return str(int(value)) if value == int(value) else f"{value:g}"
+
+
 def _take_detail_csv(grid: list[list[str]], result: SheetResult,
                      stops: StopNames | None):
     """**変換が出した集計明細CSV**を、シートと同じに読む。
@@ -797,6 +816,9 @@ def _take_detail_csv(grid: list[list[str]], result: SheetResult,
 
     停止の名前は、同じ日の停止内訳CSV(または設定部のマスタ)から引きます。
     引けない記号は**記号のまま入れて、そう言います**(黙って空にしません)。
+    ただし**分類1・内訳番号99 は名前が空でよい記号**(日報管理ツールの決まり)
+    なので、名前の欄を空のまま内訳-1 に入れ、時間は数えます。知らせは
+    「内訳番号99(名前なし) ○件・○分」の1行です(隠さず、目立たせない)。
 
     **振り分け前は、現場が記号のまま先に書き込む欄**です(`AJ4` に
     「振り分け前」と書いてあります)。変換が残した材料CSV(振り分け後)が
@@ -826,8 +848,11 @@ def _take_detail_csv(grid: list[list[str]], result: SheetResult,
     places = {column: source(column, name) for name, column in columns}
     end_hour = source(END_HOUR_COLUMN, "")
     slots = _slot_labels(at, labels)
+    from .stop_reasons import blank_name_ok
     taken: list[list[str]] = []
     unknown: list[str] = []                # 名前が引けなかった記号
+    blank_count = 0                        # 名前の空でよい記号(99)を名前なしで入れた数
+    blank_minutes = 0.0                    # その時間(分)
     unclassed: list[str] = []              # 文字種で分けられなかった記号
     placed = 0                             # 振り分けた停止の数
     seen: set[tuple[str, ...]] = set()     # 同じ 日付・直・ページ・行 は1回だけ
@@ -868,11 +893,21 @@ def _take_detail_csv(grid: list[list[str]], result: SheetResult,
                 continue
             where = (cell(line, "日付"), cell(line, "直"), cell(line, "ページ"),
                      cell(line, "行"), slot)
-            name = stops.get(where) or stops.get(("記号", code)) or ""
-            if not name:
+            # 空の名前("")も「引けた」です(名前の空でよい記号)。`or` でつなぐと
+            # 空が「引けない」に化けて、マスタの名前や記号で埋まります
+            name = stops.get(where)
+            if name is None:
+                name = stops.get(("記号", code))
+            if name is None and blank_name_ok(code):
+                name = ""                  # 停止内訳CSVが無くても、99 は名前なし
+            if name is None:
                 name = code
                 if code not in unknown:
                     unknown.append(code)
+            if not name:
+                # **隠しません。** 名前の欄が空になるだけで、時間は数えます
+                blank_count += 1
+                blank_minutes += _minutes(span)
             found[place].append((name, span))
             placed += 1
 
@@ -907,6 +942,10 @@ def _take_detail_csv(grid: list[list[str]], result: SheetResult,
         notes.append(f"停止 {placed}件は振り分け前(記号)を文字種で"
                      "振り分けました"
                      "(数字→内訳-1 / 片仮名→内訳-2 / 英字→内訳-3)")
+    if blank_count:
+        notes.append(f"内訳番号99(名前なし) {blank_count}件・"
+                     f"{_minutes_text(blank_minutes)}分は、名前の欄を空のまま"
+                     "内訳-1 に入れました")
     if unknown:
         notes.append("内訳名が分からない記号は、記号のまま入れました: "
                      + " ".join(unknown[:8])
