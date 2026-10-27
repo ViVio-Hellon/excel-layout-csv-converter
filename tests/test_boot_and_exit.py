@@ -21,7 +21,8 @@ from tests._isolation import ensure_isolated       # noqa: E402
 ensure_isolated()
 
 import boot_server                                 # noqa: E402
-from converter import app_config, boot_screen, idle_exit   # noqa: E402
+from converter import (app_config, awake_clock, boot_screen,   # noqa: E402
+                       idle_exit)
 from server import Request                         # noqa: E402
 from tests._web import STOP_KEY, WebCase           # noqa: E402
 
@@ -247,13 +248,34 @@ class ShutdownTests(WebCase):
             self.assertFalse(stopped)
 
 
+class _Hand:
+    """手で進める時計。**スリープも「進まない」も、こちらで作れます。**"""
+
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def now(self) -> float:
+        return self.t
+
+    def pass_(self, seconds: float) -> None:
+        self.t += seconds
+
+
 class IdleExitTests(unittest.TestCase):
-    """**間違って落とさない**ための3つ(猶予・処理中・未接続)。"""
+    """**間違って落とさない**ための決まり。
+
+    猶予・処理中・未接続のほかに、**スリープ復帰**と**裏に回ったタブ**を
+    見ます ── ほかのツールで「スリープ復帰時の時計のずれやブラウザの
+    タブ休止により問い合わせが止まり、サーバーが誤って終了してしまう」
+    という報告があり、このアプリも同じ作りでした(1.11.0)。
+    """
 
     def _exit(self, **kwargs):
         self.stopped = []
+        self.hand = _Hand()
         return idle_exit.IdleExit(busy=kwargs.pop("busy", lambda: False),
-                                  stop=self.stopped.append, **kwargs)
+                                  stop=self.stopped.append,
+                                  clock=self.hand.now, **kwargs)
 
     def test_1度も繋がっていなければ落とさない(self) -> None:
         """`--no-browser` で立てておく使い方を巻き添えにしない。"""
@@ -266,7 +288,7 @@ class IdleExitTests(unittest.TestCase):
         watcher.mark_alive()
         watcher.mark_closed()
         self.assertEqual(watcher._reason(), "")     # まだ猶予の中
-        watcher._closed_at = time.time() - idle_exit.GRACE_SEC - 1
+        self.hand.pass_(idle_exit.GRACE_SEC + 1)
         self.assertIn("閉じられました", watcher._reason())
 
     def test_心拍が戻れば取り消す(self) -> None:
@@ -274,22 +296,192 @@ class IdleExitTests(unittest.TestCase):
         watcher.mark_alive()
         watcher.mark_closed()
         watcher.mark_alive()                        # 再読込で戻ってきた
-        watcher._closed_at = 0.0
+        self.hand.pass_(idle_exit.GRACE_SEC + 1)
         self.assertEqual(watcher._reason(), "")
 
     def test_処理中は落とさない(self) -> None:
         watcher = self._exit(minutes=0, busy=lambda: True)
         watcher.mark_alive()
         watcher.mark_closed()
-        watcher._closed_at = time.time() - idle_exit.GRACE_SEC - 1
+        self.hand.pass_(idle_exit.GRACE_SEC + 1)
         self.assertEqual(watcher._reason(), "")
 
     def test_心拍が途切れれば終わる(self) -> None:
+        """**見えているタブ**が黙ったときは、これまでどおり終わります。"""
         watcher = self._exit(minutes=1)
         watcher.mark_alive()
-        watcher._last_beat = time.time() - 120
+        self.hand.pass_(120)
         self.assertIn("分ありませんでした", watcher._reason())
 
+    # -- スリープ復帰 ------------------------------------------------
+    def test_スリープのあいだは無通信に数えない(self) -> None:
+        """**フタを開けた瞬間に落としません。**
+
+        見るのは「起きていた時間」です(`converter/awake_clock.py`)。
+        Windows はスリープ中も時計が進むので、壁の時計で数えると
+        35分眠ったあと、ブラウザが心拍を送る前に終わっていました。
+        """
+        clock = awake_clock.AwakeClock(mono=self.mono, wall=self.wall)
+        clock.start(thread=False)                   # 見張りは手で回す
+        watcher = idle_exit.IdleExit(busy=lambda: False,
+                                     stop=[].append, minutes=30,
+                                     clock=clock.now)
+        watcher.mark_alive()
+        self.jump(35 * 60)                          # フタを閉じて35分
+        found = clock.check()                       # 起きて最初の見張り
+        self.assertIsNotNone(found)
+        self.assertTrue(found.counted)
+        self.assertEqual(watcher._reason(), "")     # **落とさない**
+        # 眠っていた分を差し引いても、**起きたあとの無通信は数えます**
+        self.awake(31 * 60, clock)
+        self.assertIn("分ありませんでした", watcher._reason())
+
+    # -- 裏に回ったタブ ----------------------------------------------
+    def test_裏に回ったタブは心拍が止まっても落とさない(self) -> None:
+        """ブラウザは見えていないタブのタイマーを**止めます**。"""
+        watcher = self._exit(minutes=30)
+        watcher.mark_hidden("タブ1", page="p1")
+        self.hand.pass_(35 * 60)                    # 凍結されて何も来ない
+        self.assertEqual(watcher._reason(), "")
+        self.assertEqual(watcher.status()["hidden"], 1)
+
+    def test_裏のまま置き去りならいつかは終わる(self) -> None:
+        """**閉じ忘れを永久に抱えません**(既定7日)。"""
+        watcher = self._exit(minutes=30, hidden_sec=60.0)
+        watcher.mark_hidden("タブ1")
+        self.hand.pass_(61)
+        self.assertIn("裏に回ったまま", watcher._reason())
+
+    def test_表に戻れば元の見切りに戻る(self) -> None:
+        watcher = self._exit(minutes=30)
+        watcher.mark_hidden("タブ1")
+        self.hand.pass_(10 * 60)
+        watcher.mark_alive("タブ1")                 # 戻ってきた
+        self.assertEqual(watcher.status()["hidden"], 0)
+        self.hand.pass_(31 * 60)
+        self.assertIn("分ありませんでした", watcher._reason())
+
+    # -- 閉じたページ番号 --------------------------------------------
+    def test_閉じたページからの遅れた合図は受けない(self) -> None:
+        """閉じると「裏に回った」と「閉じた」が続けて飛び、着く順は不定。"""
+        watcher = self._exit(minutes=30)
+        watcher.mark_alive("タブ1", page="p1")
+        watcher.mark_closed("タブ1", page="p1")
+        self.assertFalse(watcher.mark_hidden("タブ1", page="p1"))
+        self.hand.pass_(idle_exit.GRACE_SEC + 1)
+        self.assertIn("閉じられました", watcher._reason())
+
+    def test_再読込した新しいページは落とされない(self) -> None:
+        """`pagehide` は再読込でも凍結でも飛びます。**番号で見分けます。**"""
+        watcher = self._exit(minutes=30)
+        watcher.mark_alive("タブ1", page="p1")
+        watcher.mark_alive("タブ1", page="p2")      # 新しいページが先に着いた
+        watcher.mark_closed("タブ1", page="p1")     # 古いページの「閉じた」
+        self.hand.pass_(idle_exit.GRACE_SEC + 1)
+        self.assertEqual(watcher._reason(), "")     # 新しい画面は生きている
+
+    def test_2枚のうち1枚を閉じても終わらない(self) -> None:
+        watcher = self._exit(minutes=30)
+        watcher.mark_alive("タブ1", page="p1")
+        watcher.mark_alive("タブ2", page="p2")
+        watcher.mark_closed("タブ2", page="p2")
+        self.hand.pass_(idle_exit.GRACE_SEC + 1)
+        self.assertEqual(watcher._reason(), "")
+        self.assertEqual(watcher.status()["screens"], 1)
+
+    # -- 時計の作り(試験用の道具)------------------------------------
+    def setUp(self) -> None:
+        self._mono = 500.0
+        self._wall = 1_700_000_000.0
+
+    def mono(self) -> float:
+        return self._mono
+
+    def wall(self) -> float:
+        return self._wall
+
+    def jump(self, seconds: float) -> None:
+        """**眠っていた**ぶん進める(Windows型 ── 壁も monotonic も進む)。"""
+        self._wall += seconds
+        self._mono += seconds
+
+    def awake(self, seconds: float, clock) -> None:
+        """**起きていた**ぶん進める。見張りが刻んでいる状態を作ります。
+
+        空きで眠りを見分ける作りなので、一気に進めると眠っていたことに
+        なります ── 起きている時間は、見張りの間隔ごとに刻みます。
+        """
+        step = clock.tick_sec
+        for _ in range(int(seconds / step)):
+            self._wall += step
+            self._mono += step
+            clock.check()
+
+
+class AwakeClockTests(unittest.TestCase):
+    """起きていた時間だけを数える時計(`converter/awake_clock.py`)。"""
+
+    def setUp(self) -> None:
+        self.mono = 100.0
+        self.wall = 1_700_000_000.0
+        self.clock = awake_clock.AwakeClock(mono=lambda: self.mono,
+                                            wall=lambda: self.wall)
+
+    def pass_(self, seconds: float, *, mono: bool = True,
+              wall: bool = True) -> None:
+        if mono:
+            self.mono += seconds
+        if wall:
+            self.wall += seconds
+
+    def test_見張っていなければただのmonotonic(self) -> None:
+        """立てていなければ、空きが眠っていた証拠になりません。"""
+        before = self.clock.now()
+        self.pass_(600)
+        self.assertAlmostEqual(self.clock.now() - before, 600)
+        self.assertEqual(self.clock.slept, 0.0)
+
+    def test_眠っていた分を差し引く(self) -> None:
+        """Windows型(monotonic も進む)。**差し引いて数えません。**"""
+        self.clock.start(thread=False)
+        before = self.clock.now()
+        self.pass_(1800)                            # 30分 眠った
+        found = self.clock.check()
+        self.assertIsNotNone(found)
+        self.assertTrue(found.counted)
+        self.assertAlmostEqual(found.seconds, 1800 - awake_clock.TICK_SEC)
+        # 起きていた時間は、見張り1回ぶんしか進んでいません
+        self.assertAlmostEqual(self.clock.now() - before,
+                               awake_clock.TICK_SEC)
+
+    def test_壁の時計だけ飛んだとき(self) -> None:
+        """Linuxのスリープ・時刻合わせ。monotonic は止まっています。"""
+        self.clock.start(thread=False)
+        before = self.clock.now()
+        self.pass_(1800, mono=False)                # 壁だけ進んだ
+        found = self.clock.check()
+        self.assertIsNotNone(found)
+        self.assertFalse(found.counted)             # 差し引くものは無い
+        self.assertAlmostEqual(self.clock.now() - before, 0)
+
+    def test_少しの遅れでは眠っていたと言わない(self) -> None:
+        """重い処理で見張りが遅れた程度では差し引きません。"""
+        self.clock.start(thread=False)
+        self.pass_(awake_clock.JUMP_SEC - 1)
+        self.assertIsNone(self.clock.check())
+        self.assertEqual(self.clock.slept, 0.0)
+
+    def test_呼ぶほうが先でも同じ答え(self) -> None:
+        """起きた瞬間、見張りと要求のどちらが先に走るかは決まりません。"""
+        self.clock.start(thread=False)
+        before = self.clock.now()
+        self.pass_(1800)
+        self.assertAlmostEqual(self.clock.now() - before,
+                               awake_clock.TICK_SEC)
+        self.assertIsNone(self.clock.check())       # もう済んでいる
+
+
+class IdleIntervalTests(unittest.TestCase):
     def test_心拍の間隔は1か所で決まる(self) -> None:
         """画面にも同じ数を書くと、片方を直したときに自動終了が誤る。"""
         self.assertGreater(idle_exit.HEARTBEAT_MS, 0)

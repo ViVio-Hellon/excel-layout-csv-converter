@@ -23,16 +23,21 @@
 画面は生存確認を送り続けます(既定3秒ごと)。途切れて `screen_timeout_seconds`
 を越えたら、その画面は居なくなったとみなして空けます ── ブラウザが落ちた
 まま二度と開けない、という状態を作らないためです。
+
+**数えるのは「起きていた時間」です**(`converter/awake_clock.py`)。
+PC がスリープすると Windows では時計が進むので、フタを開けた瞬間に
+「12秒 音沙汰なし」で占有が外れていました ── 画面もブラウザごと眠って
+いただけで、誰も閉じていません。眠っていた分は差し引きます(戻った画面が
+黙って取り直せるようにもしてあります ── `screen.js` の `regain`)。
 """
 from __future__ import annotations
 
 import secrets
 import threading
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
-from . import app_config
+from . import app_config, awake_clock
 
 #: 画面が自分の番号を入れて送るヘッダ。**名前の出どころはここ1つ**
 HEADER = "X-Screen-Id"
@@ -46,14 +51,18 @@ class Holder:
     screen_id: str
     load_id: str = ""
     agent: str = ""
-    since: float = field(default_factory=time.time)
-    last_seen: float = field(default_factory=time.time)
+    #: **スリープを数えない時計**の値(`awake_clock`)。値そのものに意味は
+    #: 無く、差を取るためだけのものです。**時計は `ScreenLock` が持ちます**
+    #: ── ここで既定値を作ると、試験で時計を差し替えたときに
+    #: 「別の時計の値どうしを引く」ことになります
+    since: float = 0.0
+    last_seen: float = 0.0
 
-    def age(self) -> float:
-        return time.time() - self.since
+    def age(self, now: float) -> float:
+        return now - self.since
 
-    def silent_for(self) -> float:
-        return time.time() - self.last_seen
+    def silent_for(self, now: float) -> float:
+        return now - self.last_seen
 
 
 @dataclass
@@ -68,8 +77,11 @@ class Claim:
 
 
 class ScreenLock:
-    def __init__(self, timeout_seconds: Optional[int] = None) -> None:
+    def __init__(self, timeout_seconds: Optional[int] = None,
+                 clock=None) -> None:
         self._timeout = timeout_seconds
+        #: **スリープを数えない時計。** 試験は自分の時計を渡せます
+        self._clock = clock or awake_clock.now
         self._lock = threading.Lock()
         self._holder: Optional[Holder] = None
 
@@ -83,7 +95,7 @@ class ScreenLock:
     def _current(self) -> Optional[Holder]:
         """**呼ぶたびに期限切れを片づけます。** 掃除役を別に持たないため。"""
         holder = self._holder
-        if holder and holder.silent_for() > self.timeout:
+        if holder and holder.silent_for(self._clock()) > self.timeout:
             self._holder = None
             return None
         return holder
@@ -101,14 +113,16 @@ class ScreenLock:
                     False,
                     reason="この画面は開けません",
                     detail=(f"すでに別の画面で開かれています"
-                            f"(開かれてから {int(holder.age())} 秒)。"
+                            f"(開かれてから {int(holder.age(self._clock()))} 秒)。"
                             "2枚開くと、どちらの操作が効いているのか"
                             "分からなくなるため、開くことをお断りしています。"),
                     retry_after=self.timeout)
             screen_id = secrets.token_urlsafe(16)
-            self._holder = Holder(tab_id=tab_id, screen_id=screen_id, load_id=load_id,
-                                  agent=agent[:120],
-                                  since=holder.since if holder else time.time())
+            now = self._clock()
+            self._holder = Holder(tab_id=tab_id, screen_id=screen_id,
+                                  load_id=load_id, agent=agent[:120],
+                                  since=holder.since if holder else now,
+                                  last_seen=now)
             return Claim(True, screen_id=screen_id)
 
     def beat(self, screen_id: str) -> bool:
@@ -117,7 +131,7 @@ class ScreenLock:
             holder = self._current()
             if not holder or holder.screen_id != screen_id:
                 return False
-            holder.last_seen = time.time()
+            holder.last_seen = self._clock()
             return True
 
     def release(self, screen_id: str) -> bool:
@@ -142,8 +156,10 @@ class ScreenLock:
             holder = self._current()
             if not holder:
                 return {"busy": False}
-            return {"busy": True, "age": int(holder.age()),
-                    "silent": int(holder.silent_for()), "agent": holder.agent}
+            now = self._clock()
+            return {"busy": True, "age": int(holder.age(now)),
+                    "silent": int(holder.silent_for(now)),
+                    "agent": holder.agent}
 
 
 #: アプリで1つ。**画面は1枚**という約束そのもの

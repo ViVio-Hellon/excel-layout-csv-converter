@@ -66,6 +66,32 @@ class LockTests(unittest.TestCase):
         self.lock.claim("tab-A")
         self.assertFalse(self.lock.beat("よその番号"))
 
+    def test_スリープでは占有が外れない(self) -> None:
+        """**フタを開けたら「使えなくなりました」**になっていました。
+
+        数えるのは「起きていた時間」です(`converter/awake_clock.py`)。
+        Windows はスリープ中も時計が進むので、壁の時計で数えると12秒の
+        見切りを即座に越え、戻った画面が自分の占有を失っていました。
+        """
+        from converter import awake_clock
+
+        mono, wall = [500.0], [1_700_000_000.0]
+        clock = awake_clock.AwakeClock(mono=lambda: mono[0],
+                                       wall=lambda: wall[0])
+        clock.start(thread=False)
+        lock = screen_lock.ScreenLock(timeout_seconds=12, clock=clock.now)
+        screen_id = lock.claim("tab-A").screen_id
+        mono[0] += 35 * 60                          # フタを閉じて35分
+        wall[0] += 35 * 60
+        clock.check()                               # 起きて最初の見張り
+        self.assertTrue(lock.holds(screen_id))      # **占有は持ったまま**
+
+        # 起きたあとに本当に黙っていれば、これまでどおり空きます
+        for _ in range(8):                          # 2秒ずつ16秒
+            mono[0] += 2; wall[0] += 2
+            clock.check()
+        self.assertFalse(lock.holds(screen_id))
+
 
 class ScreenRouteTests(WebCase):
     """画面からの受け取りと、断られた画面の扱い。"""
@@ -104,3 +130,34 @@ class ScreenRouteTests(WebCase):
         """トークン不要の口なので、**状態だけ**にします。"""
         _status, data = self.request("POST", "/api/alive", {}, token="")
         self.assertEqual(set(data) - {"ok", "screen_ok", "ready"}, set())
+
+    def test_裏に回った合図が届く(self) -> None:
+        """**ブラウザが止めたタブを、死んだ扱いにしないため。**"""
+        from converter import idle_exit
+
+        watcher = idle_exit.IdleExit(busy=lambda: False, stop=[].append,
+                                     minutes=30)
+        self.app.idle = watcher
+        screen_id = self.claim("tab-A")
+        self.request("POST", "/api/alive",
+                     {"tab": "tab-A", "page": "p1", "state": "hidden"},
+                     screen_id=screen_id)
+        self.assertEqual(watcher.status()["hidden"], 1)
+        self.request("POST", "/api/alive",
+                     {"tab": "tab-A", "page": "p1", "state": "visible"},
+                     screen_id=screen_id)
+        self.assertEqual(watcher.status()["hidden"], 0)
+
+    def test_閉じた合図が届く(self) -> None:
+        from converter import idle_exit
+
+        watcher = idle_exit.IdleExit(busy=lambda: False, stop=[].append,
+                                     minutes=30)
+        self.app.idle = watcher
+        screen_id = self.claim("tab-A")
+        self.request("POST", "/api/alive", {"tab": "tab-A", "page": "p1"},
+                     screen_id=screen_id)
+        self.request("POST", "/api/alive",
+                     {"tab": "tab-A", "page": "p1", "leaving": True},
+                     screen_id=screen_id)
+        self.assertTrue(watcher.status()["closing"])

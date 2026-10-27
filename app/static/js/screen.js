@@ -83,7 +83,8 @@ function askOthers() {
   });
 }
 
-function tabId() {
+/** このタブの名札。**再読込しても同じ**(`sessionStorage`)。 */
+export function tabId() {
   try {
     let found = sessionStorage.getItem("xlcsv-tab") || "";
     if (!found) {

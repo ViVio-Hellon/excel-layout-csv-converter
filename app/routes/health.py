@@ -97,20 +97,43 @@ def alive(request: Request) -> Response:
     トークンが切れた画面が黙って死んだ扱いになり、開いているのに
     自動終了してしまいます(`converter.idle_exit`)。
 
-    `closed` が真なら、そのタブが閉じられたという知らせです
-    (`sendBeacon`)。猶予のあとで終わります。
+    本文(どれも省いてよい。省いた古い画面は1枚ぶんとして数えます):
+
+        tab      … タブの名札(`screen.js` の tabId)。**タブごとに数えます**
+        page     … 読み込みごとのページ番号。**閉じたページから遅れて着いた
+                   合図**(裏に回った・送りかけの心拍)で生き返らせない、
+                   また再読込した新しいページを古い「閉じた」で落とさない
+        state    … `"visible"` / `"hidden"`。`hidden` は裏に回った合図で、
+                   以後は**心拍が止まっても居るものとみなします**(ブラウザは
+                   見えていないタブのタイマーを間引く・止めるため)
+        leaving  … タブを閉じた合図(`sendBeacon`。古い画面は `closed`)。
+                   最後の1枚なら猶予のあとで終わりますが、そのあいだに
+                   心拍が戻れば取り消されます
     """
     app = request.app
     payload = request.json()
     screen_id = request.header(screen_lock.HEADER)
+    tab = str(payload.get("tab", "") or "").strip()[:80]
+    page = str(payload.get("page", "") or "").strip()[:80]
     if app.idle is not None:
-        if payload.get("closed"):
-            app.idle.mark_closed()
+        if payload.get("leaving") or payload.get("closed"):
+            app.idle.mark_closed(tab, page=page)
         else:
-            app.idle.mark_alive()
+            app.idle.mark_alive(tab, hidden=payload.get("state") == "hidden",
+                                page=page)
     return json_response({"ok": True,
                           "screen_ok": screen_lock.LOCK.beat(screen_id),
                           "ready": app.ready})
+
+
+def _awake() -> dict:
+    """スリープを数えない時計の様子(`converter/awake_clock.py`)。"""
+    from converter import awake_clock
+
+    clock = awake_clock.get()
+    found = clock.last_resume
+    return {"watching": clock.watching, "slept": round(clock.slept, 1),
+            "last_resume": found.as_dict() if found else None}
 
 
 @bp.post("/api/shutdown")
@@ -168,4 +191,7 @@ def diagnostics(request: Request) -> Response:
         "version_problem": app_config.version_problem(),
         "intake": str(intake.folder()),
         "idle": request.app.idle.status() if request.app.idle else {},
+        # **スリープから戻ったことも出します** ── 「勝手に終わった」
+        # 「繋がらなくなった」を追うとき、眠っていたかどうかが先に要ります
+        "awake": _awake(),
     })

@@ -162,7 +162,7 @@ def start(*, open_browser_flag: bool = True) -> int:
     import boot_server
     import launch_guard
     import server
-    from converter import (app_config, idle_exit, intake, jobs,
+    from converter import (app_config, awake_clock, idle_exit, intake, jobs,
                            user_settings)
     from converter import logging_utils
     from converter.logging_utils import get_logger
@@ -174,6 +174,10 @@ def start(*, open_browser_flag: bool = True) -> int:
     log = get_logger("launcher")
     log.info("起動します 版=%s pid=%s ログ=%s", app_config.version(),
              os.getpid(), logging_utils.folder())
+    # **スリープを数えない時計を先に立てます**(`converter/awake_clock.py`)。
+    # 自動終了の見張りと画面の占有がこれを見ます ── 立てる前に眠ると
+    # その分を差し引けないので、いちばん先に
+    awake_clock.start()
     if refused:
         log.warning(refused)
 
