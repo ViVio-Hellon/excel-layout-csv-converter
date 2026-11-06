@@ -9,6 +9,9 @@
     1. まずアプリ自身へ正常終了を要求する(`POST /api/shutdown`)
     2. 応答しないときだけ、記録したPIDを使う
     3. 落とす前に、そのPIDが**本当にこのアプリか**を確かめる
+       ── **番号と起動時刻の両方**で見ます(`launch_guard.judge_recorded`)。
+          再起動のあとは番号が使い回されるので、番号だけでは別の Python を
+          終わらせてしまいます
     4. `python.exe` をプロセス名だけで一括終了することはしない
 
 実行中の変換があるときは、既定では止めずに知らせます。中断してよいかは
@@ -25,6 +28,8 @@
   終わらせず、**控えていたPIDの道**へ進みます
 - **止まったと確かめるまで目印を消しません** ── 消すとPIDの控えが
   無くなり、次に打っても手がかりがありません
+- ただし**別のプロセスだと分かったとき**(番号の使い回し)は、残っていた
+  目印をその場で片付けます ── 撃つものが無いので、手がかりにもなりません
 
 待機画面(本体を組み立てる前)も、いまは止める合図に答えます
 (`boot_server.BootApp.shutdown`)。
@@ -79,8 +84,10 @@ def status() -> int:
     print({launch_guard.FREE: "起動していません"}.get(found.state, found.detail))
     lock = launch_guard.read_lock()
     if found.state != launch_guard.FREE and lock and lock.pid:
+        verdict, why = launch_guard.judge_recorded(lock)
         print(f"  控えている PID: {lock.pid}"
               f"({launch_guard.lock_path()})")
+        print(f"  その PID は   : {verdict} ── {why}")
     return 0
 
 
@@ -111,12 +118,17 @@ def _ask(question: str) -> bool:
         return False
 
 
-def _stop_recorded(pid: int) -> int:
+def _stop_recorded(pid: int, lock=None, *, port_busy: bool = False) -> int:
     """答えない相手を、控えていたPIDで止める。**確かめてから言います。**
 
     `stop.bat` が「終わってもらいました」と言ったのに Python が残っていた、
     という報告がありました。言う前に確かめ、残っていれば**残っていると
     言います**(そのままではフォルダを消せないので、次の手が要ります)。
+
+    **撃つ前に「本人か」を見ます。** 番号と起動時刻の両方が合わなければ
+    撃ちません ── 再起動のあとは Windows が番号を使い回すので、まったく
+    別の Python を終わらせてしまいます(`launch_guard.judge_recorded`)。
+    別ものだと分かったら、残っていた**目印をその場で片付けます。**
 
     **止まったと確かめるまで目印(`instance.json`)は消しません。** 消すと
     PIDの控えが無くなり、次に `stop.bat` を打っても手がかりがありません。
@@ -126,12 +138,27 @@ def _stop_recorded(pid: int) -> int:
               f"({launch_guard.lock_path()} が無い、または壊れています)。"
               "\n  タスクマネージャーで python.exe を確かめてください")
         return 1
+    verdict, why = launch_guard.judge_recorded(lock, pid)
+    if verdict == launch_guard.OTHER:
+        # **撃ちません。** 番号が使い回されていて、別のプログラムです。
+        # 残っていた目印は手がかりにならないので、ここで片付けます
+        print(f"  {why}")
+        launch_guard.remove_lock()
+        print("  残っていた目印を片付けました(このアプリは動いていません)")
+        if port_busy:
+            print("  ポートは別のプログラムが使っています ── "
+                  "config/app.json の server.port を確かめてください")
+        return 1
     if not _looks_like_our_process(pid):
         print(f"  PID {pid} がこのアプリのものだと確かめられませんでした。"
               "\n  巻き添えを避けるため、強制終了はしません。"
               f"\n  タスクマネージャーで PID {pid} を確かめてください。")
         return 1
-    print(f"  控えていた PID {pid} で終了させます")
+    if verdict == launch_guard.UNSURE:
+        # 起動時刻を読めない端末。**python のプロセスであることだけ**
+        # 確かめて撃ちます(これまでと同じ)。確かめられなかったことは言います
+        print(f"  {why}")
+    print(f"  控えていた PID {pid} で終了させます({why})")
     subprocess.run(["taskkill", "/PID", str(pid), "/F"], check=False)
     time.sleep(1.0)
     if _looks_like_our_process(pid) or _still_running():
@@ -145,11 +172,20 @@ def _stop_recorded(pid: int) -> int:
 
 
 def stop(*, force: bool = False, timeout: float = WAIT_SEC) -> int:
+    # **先に見ます。** `check_existing()` は繋がらなければその場で目印を
+    # 消すので、あとで見ると「あったのかどうか」が分からなくなります
+    had = launch_guard.lock_path().exists()
     found = launch_guard.check_existing()
 
     if found.state == launch_guard.FREE:
-        print("起動していません(止めるものはありません)")
+        # **残っていた目印はここで片付きます。** 前の版は「接続できない」で
+        # 終わってしまい、ファイルを消していませんでした(ほかのツールの報告)
         launch_guard.remove_lock()
+        if had:
+            print("起動していません。残っていた目印を片付けました ── "
+                  "Start.vbs で起動できます")
+        else:
+            print("起動していません(止めるものはありません)")
         return 0
 
     if found.state != launch_guard.OURS:
@@ -162,13 +198,20 @@ def stop(*, force: bool = False, timeout: float = WAIT_SEC) -> int:
         if found.state == launch_guard.UNKNOWN:
             print("  答えないので、控えていた目印で止めます"
                   "(起動の途中で固まるとこうなります)")
-            return _stop_recorded(recorded)
+            return _stop_recorded(recorded, lock, port_busy=True)
         # 別のアプリがポートを使っている。**そちらは触りません**
         print("  別のアプリなので触りません。"
               "config/app.json の server.port を確かめてください")
+        verdict, why = launch_guard.judge_recorded(lock)
+        if verdict == launch_guard.OTHER:
+            # 番号の使い回し(再起動のあと)。**目印だけが残っていた**
+            print(f"  {why}")
+            launch_guard.remove_lock()
+            print("  残っていた目印を片付けました")
+            return 1
         if recorded and _looks_like_our_process(recorded):
             print(f"  ただし、控えていた PID {recorded} はまだ居ます ── "
-                  "こちらは止まっていません")
+                  f"こちらは止まっていません({why})")
             return 1
         return 0
 
@@ -217,7 +260,7 @@ def stop(*, force: bool = False, timeout: float = WAIT_SEC) -> int:
 
     # 3. それでも残っていたら、控えたPIDだけを撃つ
     print("応答がありません。控えていたPIDで終了させます。")
-    return _stop_recorded(pid)
+    return _stop_recorded(pid, lock)
 
 
 def main(argv: Optional[list] = None) -> int:

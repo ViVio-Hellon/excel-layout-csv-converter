@@ -45,6 +45,11 @@ sys.path.insert(0, str(HERE / "vendor"))
 #: 動かすのに要る Python
 MIN_PYTHON = (3, 11)
 
+#: 答えないまま残っている前回のぶんを、待ってやる長さ(秒)。
+#: **固まっているだけかもしれない**ので、いきなり終了させません。
+#: これを過ぎて答えなければ、終わらせてから起動し直します
+WAIT_FOR_SILENT_SEC = 5.0
+
 #: 本体を組み立てられなかったとき、理由の画面を出したまま待つ上限(秒)。
 #: **いつまでも残しません** ── 残ると、そのフォルダを消せなくなります
 #: (配り直しは「フォルダを消して置き直す」なので、ここが効きます)。
@@ -156,6 +161,66 @@ def warm_up(log) -> None:
     log.info("変換の準備ができました(%.1f秒)", time.time() - started)
 
 
+def clear_stale(existing, log, *, may_stop: bool = True) -> bool:
+    r"""答えないままポートを握っているものを、片付けられるなら片付ける。
+
+    【なぜ要るのか】
+    ほかのツールから挙がった報告 ──
+
+        再起動のあと、まったく別のプログラムが同じ番号(PID)を持つことが
+        あります。すると、ツールはいつまでも「起動中」と判断し、画面に
+        接続できないまま止まっていました
+
+    こちらは**応答で**判定するので「起動中」には化けません(ポートが
+    受け付けなければ、残っていた目印はその場で消えます)。残るのは
+    **ポートは握られているのに `/api/health` が答えない**ときで、これには
+    2通りあります:
+
+        前回のうちが固まっている   → **5秒待って、答えなければ終わらせます**
+        別のプログラムが使っている → 触りません。残った目印だけ片付けます
+
+    見分けるのは `launch_guard.judge_recorded`(番号と**起動時刻**の両方)。
+    番号だけで撃つと、使い回された番号の別の Python を終わらせてしまいます。
+
+    片付いて**起動を続けてよいとき `True`** を返します。
+    `may_stop=False` のときは**目印を片付けるだけ**です(ポートに別のアプリが
+    答えているときは、待っても撃っても意味がありません)。
+    """
+    import launch_guard
+    import process_manager
+    from converter import app_config
+
+    lock = existing.lock or launch_guard.read_lock()
+    verdict, why = launch_guard.judge_recorded(lock)
+    log.info("答えないものがポートを握っています: %s ── 控えのPIDは %s(%s)",
+             existing.detail, verdict, why)
+
+    if verdict == launch_guard.OTHER:
+        # 前回の目印だけが残っていた(番号の使い回し)。**撃ちません**
+        launch_guard.remove_lock()
+        log.info("残っていた目印を片付けました。ポートは別のプログラムです")
+        return False
+    if verdict != launch_guard.SAME or not may_stop:
+        return False                              # 確かめられないので触らない
+
+    # **固まっているだけかもしれないので、少し待ちます**
+    port = app_config.port()
+    limit = time.time() + WAIT_FOR_SILENT_SEC
+    while time.time() < limit:
+        if launch_guard.probe_health(port, timeout=1.0) is not None:
+            log.info("待っているあいだに答えました(多重起動の判定へ戻ります)")
+            return True
+        time.sleep(0.5)
+
+    log.warning("%.0f秒 待っても答えないので、前回のぶんを終わらせます",
+                WAIT_FOR_SILENT_SEC)
+    if process_manager._stop_recorded(int(lock.pid) if lock else 0, lock) != 0:
+        log.warning("終わらせられませんでした(そのまま起動は断ります)")
+        return False
+    log.info("前回のぶんを終わらせました。起動を続けます")
+    return True
+
+
 def start(*, open_browser_flag: bool = True) -> int:
     """待ち受けを立てて、止められるまで動かす。"""
     import app as app_package
@@ -183,6 +248,13 @@ def start(*, open_browser_flag: bool = True) -> int:
 
     # -- 多重起動の判定(基盤仕様書 2.4)------------------------------
     existing = launch_guard.check_existing()
+    if existing.state == launch_guard.UNKNOWN and clear_stale(existing, log):
+        # 片付いた(または待っているあいだに答えた)。**もう一度見ます**
+        existing = launch_guard.check_existing()
+    elif existing.state == launch_guard.FOREIGN:
+        # 別のアプリがポートに答えています。**触りませんが**、前回の目印が
+        # 残っているなら片付けます(次に打つときの手がかりにならないので)
+        clear_stale(existing, log, may_stop=False)
     if existing.blocked:
         log.warning("起動を断りました: %s", existing.detail)
         text = launch_guard.refusal_text(existing)

@@ -15,8 +15,19 @@
 1だけでは足りません(PIDは使い回されます)。2だけでも足りません
 (別のアプリがHTTPを返していることがあります)。
 
-このモジュールはアプリ本体に依存しません。起動の判断だけを持つので、
-サーバが立たない状況でも動きます。
+**「起動中」の判断に目印のPIDは使いません。** ポートが受け付けなければ
+その場で目印を消して「空いている」と答えます ── ほかのツールで
+「再起動のあとPIDが使い回され、いつまでも起動中と判断して止まる」という
+不具合がありました。こちらは応答で確かめるので、そうはなりません。
+
+【PIDを撃つときは、番号だけでは足りません】(1.11.3)
+残った目印のPIDを**終了させる**ときだけは、番号の使い回しが怖い ──
+再起動のあと、まったく別の Python が同じ番号を持っていることがあります。
+そこで目印に**プロセスが始まった時刻**も書き、**番号と起動時刻の両方が
+合うときだけ**「うちのプロセス」とみなします(`judge_recorded`)。
+前の版が書いた目印には起動時刻が入っていないので、そのときは
+**「目印を書いた時刻より後に始まったプロセスは、書いた本人ではない」**
+で見ます。
 """
 from __future__ import annotations
 
@@ -66,6 +77,9 @@ class LockInfo:
     python: str = ""
     app_root: str = ""
     started_at: float = field(default_factory=time.time)
+    #: **プロセスが始まった時刻**(OSが言う値。unix秒)。番号の使い回しを
+    #: 見分けるためのもので、読めない端末では 0 です
+    proc_started_at: float = 0.0
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -130,7 +144,127 @@ def new_lock(*, port: int, token: str, stop_key: str = "") -> LockInfo:
                     stop_key=stop_key,
                     url=app_config.base_url(), app_id=app_config.app_id(),
                     version=app_config.version(), python=sys.executable,
-                    app_root=str(app_config.APP_ROOT))
+                    app_root=str(app_config.APP_ROOT),
+                    proc_started_at=process_started_at(os.getpid()) or 0.0)
+
+
+# ------------------------------------------------------------------
+# そのPIDは、目印を書いた本人か(番号の使い回しを見分ける)
+# ------------------------------------------------------------------
+#: `judge_recorded` の答え
+SAME = "同じ"            # 番号も起動時刻も合う。**うちのプロセス**
+OTHER = "別もの"         # 居ない、または起動時刻が合わない。**撃ちません**
+UNSURE = "確かめられない"  # 起動時刻を読めない端末(撃つかどうかは呼ぶ側が決める)
+
+#: 起動時刻の許し(秒)。OSが言う値と、こちらが書いた時刻のずれを見るだけ
+START_TOLERANCE = 2.0
+
+
+def process_started_at(pid: int) -> Optional[float]:
+    """そのプロセスが始まった時刻(unix秒)。**読めなければ `None`。**
+
+    追加ライブラリは使いません(`psutil` は入れられない端末があります):
+
+        Windows … `GetProcessTimes`(`ctypes` だけで読めます)
+        Linux   … `/proc/<pid>/stat` の22番目 + 起動時刻(`/proc/stat` の btime)
+
+    `None` は「読めなかった」で、**「居ない」ではありません** ── 別の
+    利用者のプロセスは開けないことがあります。
+    """
+    if not pid or pid <= 0:
+        return None
+    import sys
+    if sys.platform.startswith("win"):
+        return _started_at_windows(int(pid))
+    return _started_at_linux(int(pid))
+
+
+def _started_at_windows(pid: int) -> Optional[float]:
+    """`OpenProcess` → `GetProcessTimes`。**FILETIME を unix秒へ。**"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        #: 問い合わせだけの権限。終了させる権限は要りません
+        QUERY_LIMITED = 0x1000
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(QUERY_LIMITED, False, pid)
+        if not handle:
+            return None
+        try:
+            created = wintypes.FILETIME()
+            exited = wintypes.FILETIME()
+            kernel_t = wintypes.FILETIME()
+            user_t = wintypes.FILETIME()
+            ok = kernel32.GetProcessTimes(
+                handle, ctypes.byref(created), ctypes.byref(exited),
+                ctypes.byref(kernel_t), ctypes.byref(user_t))
+            if not ok:
+                return None
+            ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+            # FILETIME は 1601-01-01 からの 100ナノ秒。unix紀元までの差を引く
+            return (ticks - 116_444_736_000_000_000) / 10_000_000
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:                             # noqa: BLE001 - 読めないだけ
+        return None
+
+
+def _started_at_linux(pid: int) -> Optional[float]:
+    """`/proc` から。**試験と、現場以外の端末のために持っています。**"""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            fields = handle.read().rsplit(b")", 1)[1].split()
+        ticks = float(fields[19])                 # 22番目(括弧の後ろから20番目)
+        hertz = os.sysconf("SC_CLK_TCK") or 100
+        for line in open("/proc/stat", encoding="ascii"):
+            if line.startswith("btime "):
+                return float(line.split()[1]) + ticks / hertz
+    except Exception:                             # noqa: BLE001 - 読めないだけ
+        return None
+    return None
+
+
+def lock_written_at() -> Optional[float]:
+    """目印のファイルが書かれた時刻。**前の版の目印を見分けるのに使います。**"""
+    try:
+        return lock_path().stat().st_mtime
+    except OSError:
+        return None
+
+
+def judge_recorded(lock: Optional[LockInfo], pid: int = 0) -> tuple[str, str]:
+    """控えてあるPIDは、その目印を書いた本人か。`(答え, 理由)` を返します。
+
+    **終了させる前に必ず通します。** 番号だけで撃つと、再起動のあとで
+    その番号を持った**別の Python を終わらせて**しまいます。
+
+        起動時刻が目印にある   → 両方が合うときだけ `SAME`
+        起動時刻が目印に無い   → **目印を書いた時刻より後に始まっていれば
+                                 別もの**(前の版が書いた目印)
+        起動時刻が読めない     → `UNSURE`(呼ぶ側が決めます)
+    """
+    pid = int(pid or (lock.pid if lock else 0) or 0)
+    if not pid:
+        return OTHER, "控えているPIDがありません"
+    started = process_started_at(pid)
+    if started is None:
+        return UNSURE, f"PID {pid} の起動時刻を読めませんでした"
+    recorded = float(lock.proc_started_at) if lock else 0.0
+    if recorded:
+        if abs(started - recorded) <= START_TOLERANCE:
+            return SAME, f"PID {pid} は起動時刻も合います"
+        return OTHER, (f"PID {pid} は別のプロセスです"
+                       f"(起動時刻が {abs(started - recorded):.0f}秒 ちがいます "
+                       "── 番号が使い回されています)")
+    # 前の版の目印(起動時刻が入っていない)
+    written = lock_written_at()
+    if written is None:
+        return UNSURE, f"PID {pid} の起動時刻を目印と比べられませんでした"
+    if started > written + START_TOLERANCE:
+        return OTHER, (f"PID {pid} は目印を書いたあとに始まったプロセスです"
+                       "(前の版の目印 ── 番号が使い回されています)")
+    return SAME, f"PID {pid} は目印を書いた時刻より前から動いています"
 
 
 # ------------------------------------------------------------------

@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import socket
 import sys
+import time
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -145,6 +148,131 @@ class StopTests(WebCase):
     def test_控えが無ければ撃たない(self) -> None:
         """**巻き添えを避けます。** PIDが分からなければ何もしません。"""
         self.assertEqual(process_manager._stop_recorded(0), 1)
+
+    def test_番号が使い回されていたら撃たずに片付ける(self) -> None:
+        """**ここが報告の肝です。**
+
+        ほかのツールで「再起動のあと、まったく別のプログラムが同じ番号を
+        持ち、いつまでも起動中と判断する」不具合がありました。こちらは
+        応答で判定するので「起動中」にはなりませんが、**残った目印のPIDを
+        撃つとき**は番号の使い回しが怖い ── 起動時刻も見て、合わなければ
+        撃たずに目印を片付けます。
+        """
+        info = launch_guard.new_lock(port=app_config.port(), token="t",
+                                     stop_key="s")
+        # 目印は「35分前に始まったプロセス」と言っているが、そのPIDは
+        # いま動いている別もの(= 番号が使い回された)
+        info.proc_started_at = info.proc_started_at - 2100
+        launch_guard.write_lock(info)
+        with mock.patch.object(process_manager.subprocess, "run") as killed:
+            code = process_manager._stop_recorded(info.pid,
+                                                  launch_guard.read_lock())
+        self.assertEqual(code, 1)
+        killed.assert_not_called()                 # **撃っていない**
+        self.assertIsNone(launch_guard.read_lock())  # 目印は片付いた
+
+
+class StaleLockTests(WebCase):
+    """**残った目印の片付け**(ほかのツールの報告を受けて ── 1.11.3)。
+
+    報告は「再起動のあとPIDが使い回され、いつまでも起動中と判断する」。
+    こちらは応答で判定するので「起動中」には化けませんが、**ポートは
+    握られているのに答えない**ときに、控えのPIDを撃つ道があります ──
+    そこで番号と**起動時刻**の両方を見ます。
+    """
+
+    def _unknown(self):
+        return launch_guard.GuardResult(
+            state=launch_guard.UNKNOWN, lock=launch_guard.read_lock(),
+            detail="ポートは使われていますが、何のアプリか答えません")
+
+    def test_番号の使い回しなら撃たずに目印だけ片付ける(self) -> None:
+        info = launch_guard.new_lock(port=app_config.port(), token="t")
+        info.proc_started_at = info.proc_started_at - 2100   # 35分 ずれている
+        launch_guard.write_lock(info)
+        log = logging.getLogger("試験")
+        with mock.patch.object(process_manager, "_stop_recorded") as killed:
+            went = start_app.clear_stale(self._unknown(), log)
+        self.assertFalse(went)                     # 起動は続けない(ポートは他人)
+        killed.assert_not_called()                 # **撃っていない**
+        self.assertIsNone(launch_guard.read_lock())
+
+    def test_本人が固まっていれば終わらせてから起動する(self) -> None:
+        """**5秒待って、答えなければ終わらせます。**"""
+        launch_guard.write_lock(
+            launch_guard.new_lock(port=app_config.port(), token="t"))
+        log = logging.getLogger("試験")
+        with mock.patch.object(start_app, "WAIT_FOR_SILENT_SEC", 0.2), \
+             mock.patch.object(launch_guard, "probe_health", return_value=None), \
+             mock.patch.object(process_manager, "_stop_recorded",
+                               return_value=0) as killed:
+            went = start_app.clear_stale(self._unknown(), log)
+        self.assertTrue(went)
+        killed.assert_called_once()
+
+    def test_待っているあいだに答えたら撃たない(self) -> None:
+        launch_guard.write_lock(
+            launch_guard.new_lock(port=app_config.port(), token="t"))
+        log = logging.getLogger("試験")
+        with mock.patch.object(launch_guard, "probe_health",
+                               return_value={"app_id": app_config.app_id()}), \
+             mock.patch.object(process_manager, "_stop_recorded") as killed:
+            went = start_app.clear_stale(self._unknown(), log)
+        self.assertTrue(went)
+        killed.assert_not_called()
+
+    def test_起動時刻が読めなければ触らない(self) -> None:
+        launch_guard.write_lock(
+            launch_guard.new_lock(port=app_config.port(), token="t"))
+        log = logging.getLogger("試験")
+        with mock.patch.object(launch_guard, "process_started_at",
+                               return_value=None), \
+             mock.patch.object(process_manager, "_stop_recorded") as killed:
+            went = start_app.clear_stale(self._unknown(), log)
+        self.assertFalse(went)
+        killed.assert_not_called()
+        self.assertIsNotNone(launch_guard.read_lock())   # 手がかりは残す
+
+
+class JudgeRecordedTests(unittest.TestCase):
+    """番号と起動時刻で「本人か」を見る(`launch_guard.judge_recorded`)。"""
+
+    def test_自分のことは本人と分かる(self) -> None:
+        info = launch_guard.new_lock(port=8741, token="t")
+        self.assertGreater(info.proc_started_at, 0)      # OSから読めている
+        verdict, _why = launch_guard.judge_recorded(info)
+        self.assertEqual(verdict, launch_guard.SAME)
+
+    def test_起動時刻がちがえば別もの(self) -> None:
+        info = launch_guard.new_lock(port=8741, token="t")
+        info.proc_started_at -= 2100
+        verdict, why = launch_guard.judge_recorded(info)
+        self.assertEqual(verdict, launch_guard.OTHER)
+        self.assertIn("使い回され", why)
+
+    def test_居ないPIDは別もの(self) -> None:
+        info = launch_guard.new_lock(port=8741, token="t")
+        info.pid = 999_999
+        verdict, _why = launch_guard.judge_recorded(info)
+        self.assertIn(verdict, (launch_guard.OTHER, launch_guard.UNSURE))
+
+    def test_前の版の目印は書いた時刻で見る(self) -> None:
+        """起動時刻が入っていない目印 ──
+        **書いたあとに始まったプロセスは、書いた本人ではありません。**"""
+        info = launch_guard.new_lock(port=8741, token="t")
+        info.proc_started_at = 0.0                 # 前の版が書いたもの
+        launch_guard.write_lock(info)
+        self.addCleanup(launch_guard.remove_lock)
+        # 目印の時刻を「このプロセスより前」に見せる → 本人とみなす
+        os.utime(launch_guard.lock_path(), (time.time(), time.time()))
+        self.assertEqual(launch_guard.judge_recorded(info)[0],
+                         launch_guard.SAME)
+        # 目印が**このプロセスより古い**なら、別もの
+        old = launch_guard.process_started_at(os.getpid()) - 60
+        os.utime(launch_guard.lock_path(), (old, old))
+        verdict, why = launch_guard.judge_recorded(info)
+        self.assertEqual(verdict, launch_guard.OTHER)
+        self.assertIn("目印を書いたあと", why)
 
 
 class EnvironmentTests(unittest.TestCase):
