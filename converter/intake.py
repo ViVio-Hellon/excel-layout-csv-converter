@@ -15,6 +15,16 @@ r"""ドラッグで受け取ったブックの置き場所
 【置いたものは残しません】
 受け取ったブックは一時のものなので `work` に置きます(基盤仕様書 4.6)。
 次に受け取るとき、起動したとき、そして片づけを頼まれたときに消します。
+
+【デスクトップ版は写しません ── **本当の場所をそのまま読みます**】(1.12.0)
+ブラウザは本当の場所を教えてくれませんが、**デスクトップ版の窓(Tauri)は
+教えてくれます**。写す必要が無いので:
+
+    ブラウザ版     中身を送ってもらう → `work\intake` へ写す → 読む(1本 50MB まで)
+    デスクトップ版 **本当の場所を受け取る → その場で読む**(写さない・大きさの上限なし)
+
+`use_paths()` がその入口です。写していないので、**片づけでも消しません**
+(消すのは `work\intake` に写したものだけ ── 人のブックを消しません)。
 """
 from __future__ import annotations
 
@@ -75,6 +85,8 @@ class Intake:
         self.suffixes = tuple(suffixes)
         self._lock = threading.Lock()
         self._names: list[str] = []
+        #: **写さずに、その場で読む相手**(デスクトップ版)。空ならふだんどおり
+        self._paths: list[Path] = []
 
     @property
     def folder(self) -> Path:
@@ -84,6 +96,8 @@ class Intake:
     def begin(self) -> Path:
         """新しく受け取り始める。**前の組は消します**(混ざらないように)。"""
         self.clear()
+        with self._lock:
+            self._paths = []
         target = self.folder
         target.mkdir(parents=True, exist_ok=True)
         return target
@@ -116,13 +130,66 @@ class Intake:
             self._names.append(path.name)
             return path.name
 
+    def use_paths(self, paths) -> list[Path]:
+        """**写さずに、本当の場所をそのまま読む**(デスクトップ版の落とし込み)。
+
+        窓(Tauri)は落とされたファイルの**本当の場所**を教えてくれます。
+        写す理由が無いので、ここでは場所だけ覚えます ── 中身を送らないので
+        **1本の大きさの上限もありません**。
+
+        フォルダが落とされたら、その中の読める相手を集めます(コマンド版と
+        同じ集め方 ── 名前順)。読めない拡張子は**黙って捨てずに**
+        `ValueError` で断ります。
+        """
+        from .run import gather
+
+        found: list[Path] = []
+        for one in paths:
+            path = Path(str(one)).expanduser()
+            if path.is_dir():
+                found.extend(p for p in gather([path])
+                             if p.suffix.lower() in self.suffixes)
+                continue
+            if path.suffix.lower() not in self.suffixes:
+                raise ValueError(f"{path.name}: 読めるのは "
+                                 + " と ".join(self.suffixes) + " です")
+            if path.name.startswith("~$"):
+                raise ValueError(f"{path.name}: Excelが開いている間の作業ファイルです")
+            if not path.is_file():
+                raise ValueError(f"{path.name}: 見つかりません")
+            found.append(path)
+
+        limit = app_config.max_files()
+        if len(found) > limit:
+            raise ValueError(f"一度に受けられるのは {limit} 本までです"
+                             f"(いまは {len(found)} 本)")
+        with self._lock:
+            # **写したものと混ぜません。** どちらか一方です
+            self._names = []
+            self._paths = sorted(found, key=lambda p: p.name)
+            picked = list(self._paths)
+        try:
+            shutil.rmtree(self.folder)            # 前に写したものは要りません
+        except (FileNotFoundError, OSError):
+            pass
+        return picked
+
     # -- 問い合わせ --------------------------------------------------
     def files(self) -> list[Path]:
         """受け取った順ではなく**名前順**。フォルダ指定と同じ並びにします。"""
         with self._lock:
+            if self._paths:
+                # **その場で読む相手**(デスクトップ版)。消えていたら外します
+                return [p for p in self._paths if p.is_file()]
             target = self.folder
             return sorted((target / n for n in self._names if (target / n).exists()),
                           key=lambda p: p.name)
+
+    @property
+    def in_place(self) -> bool:
+        """写さずに読む相手を持っているか(画面に「写していません」と出すため)。"""
+        with self._lock:
+            return bool(self._paths)
 
     def names(self) -> list[str]:
         return [p.name for p in self.files()]
@@ -132,8 +199,14 @@ class Intake:
 
     # -- 片づけ ------------------------------------------------------
     def clear(self) -> None:
+        """写したものを消し、覚えていた場所も忘れます。
+
+        **消すのは `work\\intake` に写したものだけ**です ── 落とし込みで
+        指された本当のブックには触りません(人のファイルを消しません)。
+        """
         with self._lock:
             self._names = []
+            self._paths = []
         try:
             shutil.rmtree(self.folder)
         except FileNotFoundError:

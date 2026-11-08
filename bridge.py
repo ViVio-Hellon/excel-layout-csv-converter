@@ -245,6 +245,10 @@ class Bridge:
             application = app_package.create_app(token=self.token, port=0,
                                                  stop_key=self.stop_key)
             application.shutdown_hook = self.request_stop
+            # **デスクトップ版であることを本体へ**(診断情報の「待ち受け」の
+            # 言い方が変わります ── ポートを使っていないのに番号を出すと、
+            # 調べる人がそこを見に行きます)
+            application.config["BRIDGE"] = True
             # **自動終了の見張りは立てません。** 窓を閉じれば標準入力が閉じ、
             # このプロセスも終わります ── 見張る相手(タブ)が居ません
             application.idle = None

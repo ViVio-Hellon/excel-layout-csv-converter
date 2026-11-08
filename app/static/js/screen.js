@@ -165,7 +165,10 @@ export function release() {
 }
 
 $("gate-retry").addEventListener("click", () => location.reload());
-$("gate-close").addEventListener("click", () => {
+$("gate-close").addEventListener("click", async () => {
+  // デスクトップ版は外枠に窓を閉じてもらいます(JS からは閉じられません)
+  const desktop = await import("./desktop.js");
+  if (await desktop.closeWindow()) { return; }
   window.close();
   $("gate-note").textContent = "閉じられませんでした。このタブは手で閉じてください。";
 });

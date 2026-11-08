@@ -19,6 +19,7 @@
   断られるより、その場で言うほうが早い(上限はサーバの値が正)。
 */
 import { api } from "../api.js";
+import * as desktop from "../desktop.js";
 import * as progress from "../progress.js";
 import * as toast from "../toast.js";
 import { setBusy } from "../busy.js";
@@ -177,10 +178,60 @@ async function receive(zone, files) {
   toast.say(zone.msg, message, (extra || refused.length) ? "bad" : "ok");
 }
 
+/**
+ * **デスクトップ版は、写さずに本当の場所を送ります。**
+ *
+ * ブラウザは落とされたファイルの場所を教えてくれないので、中身を
+ * コピーして送っていました(1本 50MB まで)。窓(Tauri)は場所を
+ * 教えてくれるので、その場で読めます ── コピーも上限もありません。
+ */
+function receivePaths(zone, paths) {
+  const picked = paths.filter((p) => zone.accept.test(p)
+                                  || p.indexOf(".") < 0);   // フォルダも渡す
+  const dropped = zone.skip
+    ? picked.filter((p) => !zone.skip.test(p.split(/[\\/]/).pop()))
+    : picked;
+  if (!dropped.length) {
+    return toast.bad(zone.msg, "読めるものがありませんでした(" + zone.label + ")");
+  }
+  setBusy(true, { folderSource: folderSource() });
+  return api("/api/input/dropped", { json: { kind: zone.kind, paths: dropped } })
+    .then((result) => {
+      setBusy(false, { folderSource: folderSource() });
+      refresh(zone.kind);
+      if (!result.ok || !result.data.ok) {
+        return toast.bad(zone.msg, (result.data && result.data.message)
+                         || "受け取れませんでした");
+      }
+      toast.ok(zone.msg, result.data.count
+               + " 本を受け取りました(写さずにそのまま読みます)");
+    })
+    .catch(() => {
+      setBusy(false, { folderSource: folderSource() });
+      toast.bad(zone.msg, "受け取れませんでした");
+    });
+}
+
 function wireZone(zone) {
   const drop = $(zone.drop);
   const picker = $(zone.picker);
   if (!drop) { return; }
+
+  // デスクトップ版は、窓(Tauri)が落下を受けます(本当の場所が取れる)。
+  // タブが2つあるので、**いま見えているほう**へ入れます
+  const mine = () => {
+    // いま見えているタブ(`.panel` のうち hidden でないもの)の落下枠。
+    // そこが自分の枠でなければ、こちらは何もしません
+    const active = document.querySelector(".panel:not([hidden]) .drop");
+    return !!(active && active.id === zone.drop);
+  };
+  desktop.whenFilesDropped((paths) => {
+    if (mine()) { receivePaths(zone, paths); }
+  }, (over) => {
+    if (mine() && !drop.classList.contains("off")) {
+      drop.classList.toggle("over", over);
+    }
+  });
 
   ["dragenter", "dragover"].forEach((name) => {
     drop.addEventListener(name, (event) => {

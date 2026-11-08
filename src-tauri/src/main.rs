@@ -402,9 +402,11 @@ fn main() {
                 .inner_size(1280.0, 860.0)
                 .min_inner_size(960.0, 640.0)
                 .center()
-                // ブックのドラッグ&ドロップを画面(HTML)で受けるため、
-                // Tauri がファイルの落下を横取りしないようにします
-                .disable_drag_drop_handler()
+                // **ファイルの落下は Tauri に受けさせます。**
+                // ブラウザ(HTML)の落下は中身しか渡してくれませんが、こちらは
+                // **本当の場所**が取れます ── 写さずにその場で読めるので、
+                // コピーも「1本 50MB まで」の上限もありません
+                // (画面側は `app/static/js/desktop.js` が受け取ります)
                 .on_navigation(|url| {
                     // アプリの外のページは窓の中で開きません
                     is_app_url(url)

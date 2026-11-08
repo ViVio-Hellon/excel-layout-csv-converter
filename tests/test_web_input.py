@@ -137,3 +137,150 @@ class InputRouteTests(WebCase):
         self._add(screen_id, "a.xlsx", self._book())
         self.request("POST", "/api/input/clear", {}, screen_id=screen_id)
         self.assertEqual(intake.INTAKE.count(), 0)
+
+
+class DroppedPathTests(WebCase):
+    """**写さずに本当の場所を読む**(デスクトップ版の落とし込み)
+
+    ブラウザ版は中身を送ってもらって `work\\intake` へ写していました
+    (1本 50MB まで)。窓(Tauri)は**本当の場所**を教えてくれるので、
+    写さずにその場で読みます ── コピーも大きさの上限もありません。
+    """
+
+    def _book(self, name: str) -> Path:
+        path = self.tmp / name
+        write_xlsx(path, day_sheet())
+        return path
+
+    def _drop(self, screen_id: str, paths, kind: str | None = None):
+        body = {"paths": [str(p) for p in paths]}
+        if kind:
+            body["kind"] = kind
+        return self.request("POST", "/api/input/dropped", body,
+                            screen_id=screen_id)
+
+    # -- 直に渡す ----------------------------------------------------
+    def test_場所を渡すと写さずにそのまま読む(self) -> None:
+        screen_id = self.claim()
+        book = self._book("a.xlsx")
+        status, data = self._drop(screen_id, [book])
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["in_place"])
+        self.assertEqual(data["count"], 1)
+        # 読む相手は**元の場所そのもの**(写したものではない)
+        self.assertEqual(intake.INTAKE.files(), [book])
+        self.assertTrue(intake.INTAKE.in_place)
+        self.assertFalse((intake.INTAKE.folder / "a.xlsx").exists())
+
+    def test_名前順に並べる(self) -> None:
+        screen_id = self.claim()
+        books = [self._book("c.xlsx"), self._book("a.xlsx"),
+                 self._book("b.xlsx")]
+        _status, data = self._drop(screen_id, books)
+        self.assertEqual(data["names"], ["a.xlsx", "b.xlsx", "c.xlsx"])
+
+    def test_フォルダを落とすと中を集める(self) -> None:
+        screen_id = self.claim()
+        folder = self.tmp / "ひと組"
+        (folder / "奥").mkdir(parents=True)
+        write_xlsx(folder / "a.xlsx", day_sheet())
+        write_xlsx(folder / "奥" / "b.xlsx", day_sheet())
+        (folder / "memo.txt").write_text("よけいなもの", encoding="utf-8")
+        _status, data = self._drop(screen_id, [folder])
+        self.assertTrue(data["ok"])
+        self.assertEqual(sorted(data["names"]), ["a.xlsx", "b.xlsx"])
+
+    # -- 断るもの ----------------------------------------------------
+    def test_読めない拡張子は黙って捨てずに断る(self) -> None:
+        screen_id = self.claim()
+        memo = self.tmp / "memo.txt"
+        memo.write_text("x", encoding="utf-8")
+        _status, data = self._drop(screen_id, [memo])
+        self.assertFalse(data["ok"])
+        self.assertIn(".xlsx", data["message"])
+        self.assertEqual(intake.INTAKE.count(), 0)
+
+    def test_Excelの作業ファイルは断る(self) -> None:
+        screen_id = self.claim()
+        work = self.tmp / "~$a.xlsx"
+        work.write_bytes(b"x")
+        _status, data = self._drop(screen_id, [work])
+        self.assertFalse(data["ok"])
+        self.assertIn("Excelが開いている間", data["message"])
+
+    def test_無い場所は断る(self) -> None:
+        screen_id = self.claim()
+        _status, data = self._drop(screen_id, [self.tmp / "まだ無い.xlsx"])
+        self.assertFalse(data["ok"])
+        self.assertIn("見つかりません", data["message"])
+
+    def test_場所が空なら断る(self) -> None:
+        screen_id = self.claim()
+        _status, data = self._drop(screen_id, [])
+        self.assertFalse(data["ok"])
+        self.assertIn("空", data["message"])
+
+    def test_上限を超えたら断る(self) -> None:
+        limit = app_config.load()["limits"]["max_files"]
+        app_config.load()["limits"]["max_files"] = 2
+        self.addCleanup(lambda: app_config.load()["limits"]
+                        .__setitem__("max_files", limit))
+        screen_id = self.claim()
+        books = [self._book(f"{i}.xlsx") for i in range(3)]
+        _status, data = self._drop(screen_id, books)
+        self.assertFalse(data["ok"])
+        self.assertIn("2 本まで", data["message"])
+
+    def test_大きさの上限は見ない(self) -> None:
+        """写さないので、1本の大きさは関係ありません。"""
+        screen_id = self.claim()
+        book = self._book("大きい.xlsx")
+        before = app_config.load()["limits"]["max_file_mb"]
+        app_config.load()["limits"]["max_file_mb"] = 0
+        self.addCleanup(lambda: app_config.load()["limits"]
+                        .__setitem__("max_file_mb", before))
+        _status, data = self._drop(screen_id, [book])
+        self.assertTrue(data["ok"])
+
+    # -- 混ぜない・消さない ------------------------------------------
+    def test_写したものと混ぜない(self) -> None:
+        screen_id = self.claim()
+        path = self.tmp / "写す.xlsx"
+        write_xlsx(path, day_sheet())
+        self.request("POST", "/api/input/begin", {}, screen_id=screen_id)
+        self.request("POST", "/api/input/add", None, screen_id=screen_id,
+                     body=path.read_bytes(),
+                     headers={"X-Filename": "写す.xlsx"})
+        self.assertEqual(intake.INTAKE.count(), 1)
+
+        book = self._book("そのまま.xlsx")
+        _status, data = self._drop(screen_id, [book])
+        self.assertEqual(data["names"], ["そのまま.xlsx"])
+        self.assertEqual(intake.INTAKE.files(), [book])
+
+    def test_片づけても人のブックは消さない(self) -> None:
+        screen_id = self.claim()
+        book = self._book("のこる.xlsx")
+        self._drop(screen_id, [book])
+        self.request("POST", "/api/input/clear", {}, screen_id=screen_id)
+        self.assertEqual(intake.INTAKE.count(), 0)
+        self.assertTrue(book.is_file())             # ← ここが肝
+
+    def test_タブごとに分かれている(self) -> None:
+        screen_id = self.claim()
+        book = self._book("a.xlsx")
+        csv = self.tmp / "機側.csv"
+        csv.write_text("日付,数\n", encoding="utf-8")
+        self._drop(screen_id, [book])
+        _status, data = self._drop(screen_id, [csv], kind="tally")
+        self.assertTrue(data["ok"])
+        self.assertEqual(intake.INTAKE.count(), 1)
+        self.assertEqual(intake.TALLY_INTAKE.names(), ["機側.csv"])
+
+    def test_知らない置き場所は断る(self) -> None:
+        screen_id = self.claim()
+        status, data = self.request("POST", "/api/input/dropped",
+                                    {"paths": ["a.xlsx"], "kind": "よそ"},
+                                    screen_id=screen_id)
+        self.assertEqual(status, 400)

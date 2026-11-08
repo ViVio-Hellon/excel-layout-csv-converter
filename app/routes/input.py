@@ -17,8 +17,11 @@ from __future__ import annotations
 import urllib.parse
 
 from converter import app_config, intake, jobs, user_settings
+from converter.logging_utils import get_logger
 
 from . import Blueprint, Request, Response, json_response, refuse
+
+log = get_logger("app.input")
 
 bp = Blueprint("input")
 
@@ -111,6 +114,37 @@ def add(request: Request) -> Response:
                               "kind": store.kind, "count": store.count()})
     return json_response({"ok": True, "name": saved, "kind": store.kind,
                           "count": store.count(),
+                          "limit": app_config.max_files()})
+
+
+@bp.post("/api/input/dropped")
+def dropped(request: Request) -> Response:
+    """**落とされたファイルの本当の場所**を受け取る(デスクトップ版だけ)。
+
+    ブラウザは本当の場所を教えてくれないので、中身をコピーして送って
+    もらっていました(1本 50MB まで)。**窓(Tauri)は場所を教えてくれます** ──
+    写さずにその場で読むので、コピーも大きさの上限もありません。
+
+    フォルダを落とされたら、その中の読める相手を集めます。
+    """
+    if jobs.RUNNER.running:
+        return refuse("実行中は受け取れません", "終わるまで待ってください")
+    store = _intake(request)
+    if store is None:
+        return _unknown(request)
+    paths = request.json().get("paths") or []
+    if not isinstance(paths, list) or not paths:
+        return json_response({"ok": False, "message": "場所が空です",
+                              "kind": store.kind, "count": store.count()})
+    try:
+        found = store.use_paths(paths)
+    except ValueError as exc:
+        return json_response({"ok": False, "message": str(exc),
+                              "kind": store.kind, "count": store.count()})
+    log.info("落とし込み(写さずに読みます): %d 本", len(found))
+    return json_response({"ok": True, "kind": store.kind, "count": len(found),
+                          "names": [p.name for p in found],
+                          "in_place": True,
                           "limit": app_config.max_files()})
 
 

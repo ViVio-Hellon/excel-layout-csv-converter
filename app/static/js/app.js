@@ -7,6 +7,7 @@
   2枚目の画面で設定を読んだり、変換を始められたりしないようにするためです。
 */
 import { api, reason } from "./api.js";
+import * as desktop from "./desktop.js";
 import { markClosed, startHeartbeat } from "./health.js";
 import * as screen from "./screen.js";
 import * as tabs from "./tabs.js";
@@ -18,6 +19,7 @@ import * as job from "./views/job.js";
 const $ = (id) => document.getElementById(id);
 
 async function boot() {
+  desktop.mark();                               // デスクトップ版なら印を付ける
   if (!await screen.claim()) { return; }        // 断られた画面はここで終わり
 
   document.querySelectorAll(".limit-text").forEach((el) => {
@@ -56,6 +58,14 @@ function quit(force) {
 }
 
 function farewell() {
+  // **デスクトップ版は窓ごと閉じます。** 窓が残ると「終了したのに窓がある」
+  // ことになります(JS からは `window.close()` で閉じられません)
+  if (desktop.isDesktop()) {
+    screen.gate("終了しました", "窓を閉じています…", "",
+                { mark: "✓", hideRetry: true });
+    desktop.closeWindow();
+    return;
+  }
   screen.gate("終了しました",
               "バックエンドを終了しました。このタブは閉じてかまいません。",
               "もう一度使うときは Start.vbs から起動してください。",

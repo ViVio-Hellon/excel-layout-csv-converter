@@ -179,9 +179,17 @@ def shutdown(request: Request) -> Response:
 @bp.get("/api/diagnostics")
 def diagnostics(request: Request) -> Response:
     """調べるときの1枚(基盤仕様書 2.6)。"""
+    text = app_config.describe()
+    if request.app.config.get("BRIDGE"):
+        # デスクトップ版は**ポートを使いません**。番号を出すと、調べる人が
+        # そこを見に行って「誰も居ない」で迷います
+        text = "\n".join(
+            "待ち受け      : 使いません(デスクトップ版 ── 標準入出力)"
+            if line.startswith("待ち受け") else line
+            for line in text.splitlines())
     return json_response({
         "ok": True,
-        "text": app_config.describe(),
+        "text": text,
         "python": sys.version.split()[0],
         "executable": sys.executable,
         "pid": os.getpid(),

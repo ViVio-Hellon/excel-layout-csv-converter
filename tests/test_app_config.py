@@ -77,3 +77,33 @@ class AppConfigTests(unittest.TestCase):
         text = app_config.describe()
         for word in ("アプリID", "待ち受け", "ローカル領域", "受け入れ上限"):
             self.assertIn(word, text)
+
+
+class VersionAgreementTests(unittest.TestCase):
+    """**版は3か所に書いてあります。** 食い違ったままにしません
+
+        config/app.json          画面の帯と診断に出る版
+        src-tauri/tauri.conf.json 窓(デスクトップ版)の版
+        src-tauri/Cargo.toml     exe の版(Windowsのプロパティに出る)
+
+    どれか1つを上げ忘れると、「画面は 1.12.0 なのに exe は 1.11.3」に
+    なり、どちらが配られているのか分からなくなります。
+    """
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def _json_version(self, name: str) -> str:
+        return json.loads((self.ROOT / name).read_text(encoding="utf-8"))["version"]
+
+    def _cargo_version(self) -> str:
+        for line in (self.ROOT / "src-tauri" / "Cargo.toml") \
+                .read_text(encoding="utf-8").splitlines():
+            if line.startswith("version"):
+                return line.split("=", 1)[1].strip().strip('"')
+        return ""
+
+    def test_3か所の版がそろっている(self) -> None:
+        app = self._json_version("config/app.json")
+        self.assertRegex(app, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(self._json_version("src-tauri/tauri.conf.json"), app)
+        self.assertEqual(self._cargo_version(), app)
