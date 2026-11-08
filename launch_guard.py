@@ -233,6 +233,27 @@ def lock_written_at() -> Optional[float]:
         return None
 
 
+def same_process(pid: int, proc_started_at: float) -> tuple[str, str]:
+    """その番号のプロセスは、控えてある起動時刻のものか。`(答え, 理由)`。
+
+    **番号だけでは足りません。** 再起動のあとは Windows が番号を使い回す
+    ので、まったく別のプログラムが同じ番号を持っていることがあります
+    (デスクトップ版の印 `desktop.json` もこれで見ます)。
+    """
+    if not pid:
+        return OTHER, "番号がありません"
+    started = process_started_at(int(pid))
+    if started is None:
+        return UNSURE, f"PID {pid} の起動時刻を読めませんでした"
+    if not proc_started_at:
+        return UNSURE, f"PID {pid} の起動時刻が控えてありません"
+    if abs(started - float(proc_started_at)) <= START_TOLERANCE:
+        return SAME, f"PID {pid} は起動時刻も合います"
+    return OTHER, (f"PID {pid} は別のプロセスです"
+                   f"(起動時刻が {abs(started - float(proc_started_at)):.0f}秒 "
+                   "ちがいます ── 番号が使い回されています)")
+
+
 def judge_recorded(lock: Optional[LockInfo], pid: int = 0) -> tuple[str, str]:
     """控えてあるPIDは、その目印を書いた本人か。`(答え, 理由)` を返します。
 
@@ -247,16 +268,12 @@ def judge_recorded(lock: Optional[LockInfo], pid: int = 0) -> tuple[str, str]:
     pid = int(pid or (lock.pid if lock else 0) or 0)
     if not pid:
         return OTHER, "控えているPIDがありません"
+    recorded = float(lock.proc_started_at) if lock else 0.0
+    if recorded:
+        return same_process(pid, recorded)
     started = process_started_at(pid)
     if started is None:
         return UNSURE, f"PID {pid} の起動時刻を読めませんでした"
-    recorded = float(lock.proc_started_at) if lock else 0.0
-    if recorded:
-        if abs(started - recorded) <= START_TOLERANCE:
-            return SAME, f"PID {pid} は起動時刻も合います"
-        return OTHER, (f"PID {pid} は別のプロセスです"
-                       f"(起動時刻が {abs(started - recorded):.0f}秒 ちがいます "
-                       "── 番号が使い回されています)")
     # 前の版の目印(起動時刻が入っていない)
     written = lock_written_at()
     if written is None:

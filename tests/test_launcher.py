@@ -281,5 +281,6 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_終了コードの意味が重ならない(self) -> None:
         codes = {start_app.EXIT_OK, start_app.EXIT_ENV,
-                 start_app.EXIT_ALREADY, start_app.EXIT_PORT}
-        self.assertEqual(len(codes), 4)
+                 start_app.EXIT_ALREADY, start_app.EXIT_PORT,
+                 start_app.EXIT_OTHER_MODE}
+        self.assertEqual(len(codes), 5)

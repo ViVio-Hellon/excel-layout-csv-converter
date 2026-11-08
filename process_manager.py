@@ -34,6 +34,19 @@
 待機画面(本体を組み立てる前)も、いまは止める合図に答えます
 (`boot_server.BootApp.shutdown`)。
 
+【動かし方が2通りあります】(1.12.0)
+デスクトップ版(`.exe` の窓。`bridge.py`)は**ポートを使いません**。
+だから「ポートが答えるか」では見つかりません ── 印
+(`runtime/desktop.json` の 番号 + プロセスの起動時刻)で見ます
+(`converter/launch_marker.py`)。
+
+    デスクトップ版 … **窓に閉じてもらいます**(閉じれば標準入力が閉じ、
+                     Python も終わります)。変換中の確認は窓が出します
+    ブラウザ版     … これまでどおり(`POST /api/shutdown` → PID)
+
+**同時には動きません。** どちらか一方しか居ないので、見つけたほうを
+止めます。
+
 使い方:
 
     python process_manager.py            止める
@@ -43,6 +56,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -53,7 +67,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import launch_guard                                # noqa: E402
-from converter import app_config                   # noqa: E402
+from converter import app_config, launch_marker     # noqa: E402
 from converter.logging_utils import get_logger      # noqa: E402
 
 log = get_logger("process_manager")
@@ -63,6 +77,15 @@ WAIT_SEC = 20.0
 
 
 def status() -> int:
+    desktop = launch_marker.desktop_running()
+    if desktop:
+        print(f"デスクトップ版が起動しています: {desktop['detail']}")
+        print(f"  版          : {desktop.get('version')}")
+        print(f"  待ち受け    : **ポートを使いません**(標準入出力)")
+        print(f"  印          : {launch_marker.desktop_path()}")
+        if desktop.get("verdict") != launch_guard.SAME:
+            print(f"  確かめ      : {desktop.get('why')}")
+        return 0
     found = launch_guard.check_existing()
     if found.state == launch_guard.OURS:
         health = found.health
@@ -171,7 +194,86 @@ def _stop_recorded(pid: int, lock=None, *, port_busy: bool = False) -> int:
     return 0
 
 
+def _stop_desktop(found: dict, *, force: bool, timeout: float) -> int:
+    """デスクトップ版を止める ── **窓に閉じてもらいます。**
+
+    窓(`.exe`)が閉じれば、子の Python は標準入力が閉じて終わります
+    (取り残しません)。**変換中かどうかの確認は窓が出します** ──
+    `--force` なら確認を飛ばして強く閉じます。
+
+    撃つ前に、その番号が**本当にその窓か**を確かめます(番号は使い回され
+    ます。`launch_guard.same_process`)。
+    """
+    import signal
+
+    exe_pid = int(found.get("exe_pid") or 0)
+    py_pid = int(found.get("pid") or 0)
+    print("止めます: デスクトップ版 "
+          + (found.get("detail") or f"PID {found.get('pid')}"))
+
+    verdict, why = launch_guard.same_process(exe_pid,
+                                             float(found.get("exe_started_at")
+                                                   or 0.0))
+    if exe_pid and verdict == launch_guard.OTHER:
+        print(f"  窓の番号が合いません({why})。窓には触りません")
+        exe_pid = 0
+
+    def alive() -> bool:
+        return launch_marker.desktop_running() is not None
+
+    def ask(pid: int, hard: bool) -> None:
+        if not pid:
+            return
+        if sys.platform.startswith("win"):
+            args = ["taskkill", "/PID", str(pid)] + (["/F"] if hard else [])
+            subprocess.run(args, check=False, capture_output=True)
+            return
+        try:
+            os.kill(pid, signal.SIGKILL if hard else signal.SIGTERM)
+        except OSError as exc:
+            print(f"  PID {pid} に頼めませんでした: {exc}")
+
+    # 1. 窓に閉じてもらう(変換中なら窓が訊きます)
+    if exe_pid:
+        print(f"  窓(PID {exe_pid})に閉じるよう頼みます"
+              + ("(強制)" if force else ""))
+        ask(exe_pid, force)
+    elif py_pid:
+        print(f"  窓が分からないので、Python(PID {py_pid})へ頼みます")
+        ask(py_pid, force)
+
+    limit = time.time() + timeout
+    while time.time() < limit:
+        if not alive():
+            print("止まりました。")
+            launch_marker.remove_desktop(expect=found)
+            return 0
+        time.sleep(0.5)
+
+    # 2. それでも残っていたら(確認ダイアログが出たまま・固まった)
+    if not force:
+        print("まだ残っています。変換中か、閉じる確認が出たままです。"
+              "\n  窓を確かめてください。すぐ止めるなら: stop.bat --force")
+        return 1
+    print("  強制で終わらせます")
+    ask(exe_pid, True)
+    ask(py_pid, True)
+    time.sleep(1.0)
+    if alive():
+        print(f"まだ残っています(窓 PID {exe_pid} / Python PID {py_pid})。"
+              "\n  タスクマネージャーで終了させてください")
+        return 1
+    launch_marker.remove_desktop(expect=found)
+    print("止まりました。")
+    return 0
+
+
 def stop(*, force: bool = False, timeout: float = WAIT_SEC) -> int:
+    # **デスクトップ版はポートを使いません。** 先に印で見ます
+    desktop = launch_marker.desktop_running()
+    if desktop:
+        return _stop_desktop(desktop, force=force, timeout=timeout)
+
     # **先に見ます。** `check_existing()` は繋がらなければその場で目印を
     # 消すので、あとで見ると「あったのかどうか」が分からなくなります
     had = launch_guard.lock_path().exists()

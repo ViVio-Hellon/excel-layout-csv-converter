@@ -60,6 +60,7 @@ EXIT_OK = 0
 EXIT_ENV = 1            # 実行環境が足りない
 EXIT_ALREADY = 3        # すでに起動している(断った)
 EXIT_PORT = 4           # ポートが塞がっている
+EXIT_OTHER_MODE = 5     # **デスクトップ版が動いている**(断った)
 
 
 # ------------------------------------------------------------------
@@ -228,7 +229,7 @@ def start(*, open_browser_flag: bool = True) -> int:
     import launch_guard
     import server
     from converter import (app_config, awake_clock, idle_exit, intake, jobs,
-                           user_settings)
+                           launch_marker, user_settings)
     from converter import logging_utils
     from converter.logging_utils import get_logger
 
@@ -245,6 +246,19 @@ def start(*, open_browser_flag: bool = True) -> int:
     awake_clock.start()
     if refused:
         log.warning(refused)
+
+    # -- デスクトップ版が動いていたら、こちらは起動しません --------
+    # **同時に2つ動かしません**(どちらを後から開いても、後のほうが止まる)。
+    # デスクトップ版はポートを使わないので、印で見ます
+    # (`converter/launch_marker.py`)
+    desktop = launch_marker.desktop_running()
+    if desktop:
+        title, what = launch_marker.refusal("browser", desktop)
+        log.warning("%s(%s)。ブラウザ版は起動しません", title,
+                    desktop.get("detail", ""))
+        tell(f"{title}({desktop.get('detail', '')})\n\n{what}",
+             title="起動できません")
+        return EXIT_OTHER_MODE
 
     # -- 多重起動の判定(基盤仕様書 2.4)------------------------------
     existing = launch_guard.check_existing()
