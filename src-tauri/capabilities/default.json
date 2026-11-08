@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "画面(Python が返す画面)から呼んでよいもの。窓を閉じる・デスクトップ版かを聞く だけ",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://app.localhost/*", "app://localhost/*"]
+  },
+  "permissions": ["core:default"]
+}

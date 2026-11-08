@@ -187,6 +187,7 @@ class Bridge:
         self.stop_key = ""
         self._done = threading.Event()
         self.stop_reason = ""
+        self._asked = False                       # 画面から1件でも来たか
         self.max_body = 64 * 1024 * 1024          # 準備ができたら設定から直します
 
     # -- 組み立て ---------------------------------------------------
@@ -214,7 +215,10 @@ class Bridge:
         awake_clock.start()
         self.max_body = app_config.max_file_bytes() + MAX_BODY_MARGIN
 
-        self.token = secrets.token_urlsafe(32)
+        # **合言葉は外枠(exe)が決めます。** 外枠は画面から来た要求に自分の
+        # 合言葉を付け替えるので、ここで別のものを作ると画面が断られます
+        # (窓は出るのに「この操作は受け付けられません」になります)
+        self.token = os.environ.get("XLCSV_TOKEN", "") or secrets.token_urlsafe(32)
         self.stop_key = secrets.token_urlsafe(16)
         boot = boot_server.BootApp(0, stop_key=self.stop_key)
         boot.shutdown_hook = self.request_stop
@@ -281,6 +285,12 @@ class Bridge:
         """1件ぶん。**1件の失敗で止めません。**"""
         from converter.logging_utils import get_logger
 
+        if not self._asked:
+            # **窓が本当に画面を読み込んだ**ことの記録(1回だけ)。
+            # 「窓は出たのに真っ白」を切り分けられるようにします
+            self._asked = True
+            get_logger("bridge").info("画面から最初の要求が来ました: %s %s",
+                                      head.get("method"), head.get("path"))
         try:
             response = self.handover.dispatch(to_request(head, body))
             status, headers, data = from_response(response)

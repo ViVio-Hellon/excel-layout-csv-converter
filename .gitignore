@@ -21,3 +21,6 @@ venv/
 *.sqlite3
 *.log
 .DS_Store
+# Tauri(デスクトップ版の外枠)の作業もの
+src-tauri/target/
+src-tauri/gen/
