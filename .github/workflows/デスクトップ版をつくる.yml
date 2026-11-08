@@ -1,0 +1,70 @@
+# デスクトップ版(Windows の .exe)をつくる
+#
+# 配る端末に Rust を入れる必要はありません。ここで作った
+# ExcelCsvConverter.exe を、いつもどおりフォルダに入れて配ります。
+#
+#   Actions → この流れ → Run workflow
+#   → 終わったら Artifacts の ExcelCsvConverter-windows を取ります
+#
+# Python は**同梱しません**(端末の Python を使います)。ここで作るのは
+# 窓だけです。
+name: デスクトップ版をつくる
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows の exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust を入れる
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 作ったものを覚えておく(次は速くなります)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 版がそろっているか・Rust の試験
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: つくる
+        working-directory: src-tauri
+        run: cargo build --release --locked
+
+      - name: 版を控える
+        shell: pwsh
+        run: |
+          $v = (Get-Content config/app.json -Raw | ConvertFrom-Json).version
+          "版: $v" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: 成果物として残す
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExcelCsvConverter-windows
+          path: src-tauri/target/release/ExcelCsvConverter.exe
+          if-no-files-found: error
+
+  tests:
+    name: Python の試験(業務のところ)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 試験(追加ライブラリは入れません)
+        run: python -m unittest discover -s tests -v
+      - name: ポートを1つも開かずに通るか
+        run: python scripts/ポート無しで通るか見る.py
