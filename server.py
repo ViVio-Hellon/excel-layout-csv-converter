@@ -9,10 +9,15 @@
 入れるものが増えるほど「動かない」理由が増えます。
 
 【受け渡しの形】
-WSGI の代わりに、このファイルが決める `Request` / `Response` の2つだけを
-約束にします。待機画面(`boot_server.BootApp`)も本体(`app.App`)も
+WSGI の代わりに、`Request` / `Response` の2つだけを約束にします。
+待機画面(`boot_server.BootApp`)も本体(`app.App`)も
 `dispatch(request) -> Response` を持っていればよく、**待ち受けを開き
 直さずに入れ替えられます**(`boot_server.Handover`)。
+
+**形そのものは `converter/wire.py` に居ます**(ここからも同じ名前で
+借りられます)。デスクトップ版(Tauri)は**ポートを使わず**標準入出力で
+要求を受けるので(`bridge.py`)、形だけが要る側が `http.server` を
+読まずに済むように分けてあります。
 """
 from __future__ import annotations
 
@@ -20,13 +25,16 @@ import json
 import socket
 import threading
 import time
-from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Optional
+from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from converter import app_config
 from converter.logging_utils import get_logger
+# **形は1か所。** ここからも借りられるように再輸出します(取り込み元を
+# 2通りにすると、直したほうと直していないほうができます)
+from converter.wire import (Request, Response,  # noqa: F401 - 再輸出
+                            html_response, json_response, refuse)
 
 log = get_logger("server")
 
@@ -36,62 +44,6 @@ MAX_BODY = app_config.max_file_bytes() + 1024 * 1024
 #: 停止要求を受けてから閉じるまでの猶予(秒)。応答を返しきる前に止めると
 #: 「押したのに何も起きなかった」ように見えます
 GRACEFUL_TIMEOUT_SEC = 3
-
-
-# ------------------------------------------------------------------
-# 受け渡しの形
-# ------------------------------------------------------------------
-@dataclass
-class Request:
-    method: str
-    path: str
-    query: dict = field(default_factory=dict)
-    body: bytes = b""
-    headers: dict = field(default_factory=dict)
-    #: 受け取ったアプリ自身。Flask の `current_app` にあたるものを
-    #: **明示して渡します** ── スレッドローカルを1つ増やさないため
-    app: Any = None
-
-    def json(self) -> dict:
-        if not self.body:
-            return {}
-        try:
-            found = json.loads(self.body.decode("utf-8"))
-            return found if isinstance(found, dict) else {}
-        except Exception:                          # noqa: BLE001
-            return {}
-
-    def header(self, name: str, default: str = "") -> str:
-        return self.headers.get(name.lower(), default)
-
-    def arg(self, name: str, default: str = "") -> str:
-        values = self.query.get(name) or []
-        return values[0] if values else default
-
-
-@dataclass
-class Response:
-    status: int = 200
-    body: bytes = b""
-    content_type: str = "application/json; charset=utf-8"
-    headers: dict = field(default_factory=dict)
-
-
-def json_response(payload: dict, status: int = 200, **headers) -> Response:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    return Response(status=status, body=body, headers=headers)
-
-
-def html_response(html: str, status: int = 200) -> Response:
-    return Response(status=status, body=html.encode("utf-8"),
-                    content_type="text/html; charset=utf-8",
-                    headers={"Cache-Control": "no-store, must-revalidate"})
-
-
-def refuse(reason: str, detail: str = "", status: int = 409, **extra) -> Response:
-    """断りは**理由を必ず添えます**(何をすればよいかまで書く)。"""
-    return json_response({"ok": False, "reason": reason, "detail": detail,
-                          **extra}, status=status)
 
 
 # ------------------------------------------------------------------

@@ -48,7 +48,7 @@ application.mark_ready()
 screen_id = ""
 def call(method, path, payload=None, *, body=b"", headers=None):
     from urllib.parse import parse_qs
-    head = {"content-type": "application/json", "host": "127.0.0.1",
+    head = {"content-type": "application/json", "host": "app.localhost",
             "x-tool-token": "t"}
     if screen_id:
         head["x-screen-id"] = screen_id

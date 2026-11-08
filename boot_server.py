@@ -29,7 +29,7 @@ from typing import Any, Optional
 from converter import app_config, boot_screen
 from converter.logging_utils import get_logger
 
-from server import Request, Response, html_response, json_response
+from converter.wire import Request, Response, html_response, json_response
 
 log = get_logger("boot_server")
 

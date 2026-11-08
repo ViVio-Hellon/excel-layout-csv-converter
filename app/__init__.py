@@ -34,7 +34,9 @@ from typing import Any, Optional
 from converter import app_config, screen_lock
 from converter.logging_utils import get_logger
 
-from server import Request, Response, json_response, refuse
+# **`server.py`(待ち受け)は読みません。** デスクトップ版はポートを
+# 使わないので、形だけを借ります(`converter/wire.py`)
+from converter.wire import Request, Response, json_response, refuse
 
 log = get_logger("app")
 
@@ -111,7 +113,7 @@ class App:
     def _check(self, request: Request) -> Optional[Response]:
         """守りの4つ。**通らなかった理由をそのまま返します。**"""
         host = (request.header("host") or "").split(":")[0]
-        if host and host not in ("127.0.0.1", "localhost"):
+        if host and host not in app_config.allowed_hosts():
             log.warning("Host不一致で拒否: %s", request.header("host"))
             return refuse("このアドレスからは利用できません", host, status=400)
 

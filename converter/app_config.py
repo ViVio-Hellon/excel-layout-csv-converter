@@ -181,6 +181,21 @@ def host() -> str:
     return str(load()["server"]["host"])
 
 
+#: 画面から来てよい宛先。ブラウザ版は `127.0.0.1`、**デスクトップ版は
+#: 外枠(Tauri)の中で受ける名前**です ── `app://localhost/` が
+#: Windows の WebView2 では `http://app.localhost/`、WebKitGTK では
+#: `http://localhost/`(いずれも**ネットワークを通りません**)。
+#: `Host` の確かめは TCP で待ち受けるための守りなので、待ち受けない道の
+#: 名前はここに並べます(`app/__init__.py` の `_check`)
+BROWSER_HOSTS: tuple[str, ...] = ("127.0.0.1", "localhost")
+BRIDGE_HOSTS: tuple[str, ...] = ("app.localhost", "tauri.localhost", "app")
+
+
+def allowed_hosts() -> tuple[str, ...]:
+    """`Host` に入っていてよい名前(ブラウザ版 + デスクトップ版)。"""
+    return BROWSER_HOSTS + BRIDGE_HOSTS
+
+
 def port() -> int:
     """待ち受けポート。**候補を持ちません。**
 

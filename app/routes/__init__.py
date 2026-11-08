@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from server import (Request, Response, html_response,  # noqa: F401 - 再輸出
+from converter.wire import (Request, Response, html_response,  # noqa: F401 - 再輸出
                     json_response, refuse)
 
 __all__ = ["Blueprint", "Request", "Response", "html_response",
