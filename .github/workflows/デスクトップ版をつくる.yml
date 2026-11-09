@@ -3,8 +3,14 @@
 # 配る端末に Rust を入れる必要はありません。ここで作った
 # ExcelCsvConverter.exe を、いつもどおりフォルダに入れて配ります。
 #
-#   Actions → この流れ → Run workflow
-#   → 終わったら Artifacts の ExcelCsvConverter-windows を取ります
+# いつ動くか
+#
+#   main に押すたび     … いつでも最新の exe がある状態にします
+#   v… のタグを押したとき … 配るぶん
+#   手で実行            … Actions → この流れ → Run workflow
+#
+# 終わったら、その実行の画面の下の Artifacts から
+# ExcelCsvConverter-windows を取ります。
 #
 # Python は**同梱しません**(端末の Python を使います)。ここで作るのは
 # 窓だけです。
@@ -13,8 +19,16 @@ name: デスクトップ版をつくる
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+
+# 同じブランチへ続けて押したときは、**前の実行を止めて最後のだけ**作ります
+# (Windows のランナーは使った分が10倍で数えられるため)
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
