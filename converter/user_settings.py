@@ -26,7 +26,7 @@ from . import app_config
 
 #: 画面から変えられる項目。**表示名の出どころもここ1つ**
 FIELDS = ("input_dir", "output_dir", "line", "ref_dir", "stop_csv",
-          "log_dir")
+          "plate_dir", "log_dir")
 
 LABELS = {
     "input_dir": "入力フォルダ",
@@ -34,6 +34,7 @@ LABELS = {
     "line": "ライン",
     "ref_dir": "参照用マスタの置き場所",
     "stop_csv": "停止内訳CSVの置き場所",
+    "plate_dir": "板データ参照パス",
     "log_dir": "ログの置き場所",
 }
 
@@ -57,6 +58,9 @@ class Settings:
     #: 停止内訳CSV。**フォルダでも、ファイルそのものでも受けます**
     #: (空なら参照用マスタの置き場所の `停止内訳.csv`)
     stop_csv: str = ""
+    #: 板データ参照パス(板集計タブが読む根)。**配下はラインごとのフォルダ**
+    #: (`<ここ>\L-1\集計\2026.11\17\集計_2026-11-17_L-1.csv`)
+    plate_dir: str = ""
     #: ログの置き場所(空ならローカル領域の `logs`)。**書けなければ戻します**
     log_dir: str = ""
 
@@ -141,7 +145,7 @@ def stop_csv_path(settings: Settings) -> Path | None:
 def describe_paths(settings: Settings) -> list[dict]:
     """1項目ずつ、**どこを指していて、そこはあるのか**を返す。"""
     found: list[dict] = []
-    for key in ("input_dir", "output_dir", "ref_dir", "log_dir"):
+    for key in ("input_dir", "output_dir", "ref_dir", "plate_dir", "log_dir"):
         text = getattr(settings, key)
         item = {"key": key, "label": LABELS[key], "text": text,
                 "resolved": "", "exists": False, "note": ""}

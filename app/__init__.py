@@ -191,7 +191,8 @@ def create_app(*, token: Optional[str] = None,
 
 
 def _register_routes(app: App) -> None:
-    from .routes import health, input as input_routes, job, screen, settings
+    from .routes import (health, input as input_routes, job, plate, screen,
+                         settings)
 
-    for module in (health, screen, settings, input_routes, job):
+    for module in (health, screen, settings, input_routes, job, plate):
         app.register(module.bp)
