@@ -32,6 +32,10 @@ _done = False
 
 ENV = "XLCSV_LOCAL_DIR"
 
+#: 配布設定の置き場所(`配布設定\`)。**本物のツールのフォルダに作らない**
+#: ために、ここも一時フォルダへ逃がします
+ENV_LAUNCH = "XLCSV_LAUNCH_DIR"
+
 
 def _escape(name: str) -> Path:
     tmp = Path(tempfile.mkdtemp(prefix=f"xlcsv_test_{name}_"))
@@ -55,11 +59,14 @@ def ensure_isolated() -> list[str]:
     _done = True
 
     _quiet_vendor()
-    current = os.environ.get(ENV, "")
-    if current and _is_temp(Path(current)):
-        return []                                  # すでに逃がしてある
-    os.environ[ENV] = str(_escape("local"))
-    return [ENV]
+    escaped: list[str] = []
+    for name, label in ((ENV, "local"), (ENV_LAUNCH, "launch")):
+        current = os.environ.get(name, "")
+        if current and _is_temp(Path(current)):
+            continue                               # すでに逃がしてある
+        os.environ[name] = str(_escape(label))
+        escaped.append(name)
+    return escaped
 
 
 def _quiet_vendor() -> None:

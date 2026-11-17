@@ -9,7 +9,8 @@ import os
 import subprocess
 import sys
 
-from converter import app_config, jobs, stop_reasons, user_settings
+from converter import (app_config, distribution, jobs, stop_reasons,
+                       user_settings)
 from converter.logging_utils import get_logger, log_paths
 
 from . import Blueprint, Request, Response, json_response, refuse
@@ -19,8 +20,9 @@ log = get_logger("app.settings")
 bp = Blueprint("settings")
 
 
-def _payload(settings: user_settings.Settings, message: str = "") -> Response:
-    return json_response({
+def _data(settings: user_settings.Settings, message: str = "") -> dict:
+    """画面へ返すもの。**経路2つで同じ形**にするため1か所で組みます。"""
+    return {
         "ok": True,
         "settings": settings.as_dict(),
         "paths": user_settings.describe_paths(settings),
@@ -30,7 +32,14 @@ def _payload(settings: user_settings.Settings, message: str = "") -> Response:
         # (CSVとマスタ)あるので、言わないと「内訳が空」の理由が分からない
         "stop_reasons": _stop_reasons(),
         "logs": log_paths(),
-    })
+        # 配布設定(配った先で使う値)。**どの値が配布設定から来たか**も
+        # 入っています ── 画面は札を出します
+        "distribution": distribution.state(),
+    }
+
+
+def _payload(settings: user_settings.Settings, message: str = "") -> Response:
+    return json_response(_data(settings, message))
 
 
 def _stop_reasons() -> dict:
@@ -95,3 +104,36 @@ def open_folder(request: Request) -> Response:
     except Exception as exc:                       # noqa: BLE001
         return refuse("開けませんでした", str(exc), status=500)
     return json_response({"ok": True, "opened": str(target)})
+
+
+@bp.post("/api/distribution")
+def distribute(request: Request) -> Response:
+    r"""配布設定を**書き出す・読み込み直す・消す**。
+
+    置き場所は起動用のファイルと同じ階層の `配布設定\` です
+    (`converter.distribution` に、なぜそこなのかを書いてあります)。
+
+    **パスワードは聞きません。** このツールには管理者パスワードがなく、
+    書き出すのは自分の端末の設定だけです ── 守るものが増えないので、
+    鍵を増やしません。
+    """
+    if jobs.RUNNER.running:
+        return refuse("変換中は配布設定を変えられません",
+                      "終わるまで待つか、中止してください")
+    body = request.json()
+    what = str(body.get("what") or "")
+    if what == "export":
+        items = body.get("items")
+        result = distribution.export(
+            [str(one) for one in items] if isinstance(items, list) else None)
+    elif what == "reload":
+        result = distribution.reload_now()
+    elif what == "forget":
+        result = distribution.forget()
+    else:
+        return refuse("できない操作です", what, status=400)
+    log.info("配布設定: %s → %s", what, result.get("message"))
+    data = _data(user_settings.load(), result.get("message", ""))
+    data["ok"] = bool(result.get("ok"))
+    data["distribution_result"] = result
+    return json_response(data)

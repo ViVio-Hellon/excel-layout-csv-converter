@@ -229,7 +229,7 @@ class Bridge:
         """本体を組み立てて差し替えます(別のスレッドから呼びます)。"""
         import app as app_package
         import start_app
-        from converter import intake, user_settings
+        from converter import distribution, intake
         from converter.logging_utils import get_logger
 
         log = get_logger("bridge")
@@ -239,7 +239,7 @@ class Bridge:
             if self._done.is_set():
                 return
             self.handover.mark_stage("接続を確認中", "connect")
-            user_settings.apply_to_vendor(user_settings.load())
+            distribution.boot()        # 配布設定 → この端末の設定 → 写しへ
             intake.clear_all()                    # 前回の受け取りは持ち越さない
 
             application = app_package.create_app(token=self.token, port=0,

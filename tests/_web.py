@@ -42,8 +42,15 @@ class WebCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
-        self._before = os.environ.get("XLCSV_LOCAL_DIR")
+        # ローカル領域(設定・ログ・受け取り)と、**配布設定の置き場所**を
+        # 1件ごとに新しい一時フォルダへ。配布設定は本物のツールの
+        # フォルダに作られるものなので、ここを逃がさないと試験が
+        # リポジトリに `配布設定\` を作ります
+        self._before = {name: os.environ.get(name)
+                        for name in ("XLCSV_LOCAL_DIR", "XLCSV_LAUNCH_DIR")}
         os.environ["XLCSV_LOCAL_DIR"] = str(self.tmp / "local")
+        os.environ["XLCSV_LAUNCH_DIR"] = str(self.tmp / "launch")
+        (self.tmp / "launch").mkdir(parents=True, exist_ok=True)
         self.addCleanup(self._restore_env)
         app_config.ensure_local_dirs()
 
@@ -58,10 +65,11 @@ class WebCase(unittest.TestCase):
         self.app = app_package.create_app(token=TOKEN, stop_key=STOP_KEY)
 
     def _restore_env(self) -> None:
-        if self._before is None:
-            os.environ.pop("XLCSV_LOCAL_DIR", None)
-        else:
-            os.environ["XLCSV_LOCAL_DIR"] = self._before
+        for name, before in self._before.items():
+            if before is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = before
 
     # -- 叩く --------------------------------------------------------
     def request(self, method: str, path: str, payload=None, *,
