@@ -47,6 +47,9 @@ export function render(job) {
   if (!job || !job.id) { return; }
   const tally = job.kind === TALLY;
   setBusy(job.running, { folderSource: folderSource() });
+  // 走っている間は、**どのタブにいても**進み具合を出します
+  // (板集計・設定のタブでは、ふだんは隠しています ── `layout.css`)
+  document.body.classList.toggle("busy", !!job.running);
   $("idle-msg").hidden = true;
   $("running-title").textContent = job.kind + " ── 進み具合";
 

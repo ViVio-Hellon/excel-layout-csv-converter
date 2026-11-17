@@ -57,3 +57,46 @@
     --shadow: none;
   }
 }
+
+/* グラフの色 ── **意味で決めます**(`converter/plate_graph.py` が渡す印)
+ *
+ * 色名そのものを JS もサーバも持ちません。渡ってくるのは
+ * `qty`(枚数のなかま)・`dur`(時間のなかま)・`stop`(停止)・
+ * `cat-1`〜(並べて見分けるための色)・`shift-*`(直の色)という**意味**で、
+ * 何色かはここ1か所で決めます。
+ *
+ * 直の4色は**Excelのグラフと同じ 青・赤・緑・紫**にしてあります
+ * (表でもグラフでも同じ色。入れ替え禁止 ── 表の1直とグラフの1直が
+ *  違う色だと結び付きません)。
+ */
+:root {
+  --qty:   #1f8a4c;
+  --dur:   #1f6feb;
+  --stop:  #c87a1e;
+  --goal:  #7a4fd6;
+  --cumulative: #a24fd6;
+
+  --shift-1: #1f6feb;
+  --shift-2: #c0392b;
+  --shift-3: #1f8a4c;
+  --shift-day: #7a4fd6;
+
+  --cat-1: #1f6feb;  --cat-2: #c0392b;  --cat-3: #1f8a4c;
+  --cat-4: #b8860b;  --cat-5: #7a4fd6;  --cat-6: #0f8e9e;
+  --cat-7: #d2691e;  --cat-8: #8a2f6b;  --cat-9: #4b6b8a;
+  --cat-10: #8a94a3;                   /* 「その他」。主張させない */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* 暗い地では少し明るく。**同じ意味は同じ系統の色**のままにします */
+    --qty:   #46c98a;  --dur:   #6cb4ff;  --stop:  #ffb648;
+    --goal:  #b48cff;  --cumulative: #d08cff;
+    --shift-1: #6cb4ff; --shift-2: #ff7a6b;
+    --shift-3: #46c98a; --shift-day: #b48cff;
+    --cat-1: #6cb4ff;  --cat-2: #ff7a6b;  --cat-3: #46c98a;
+    --cat-4: #e3b341;  --cat-5: #b48cff;  --cat-6: #35c7d6;
+    --cat-7: #ff9f5a;  --cat-8: #e07ac0;  --cat-9: #9bb4cf;
+    --cat-10: #7e8794;
+  }
+}

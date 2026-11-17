@@ -100,3 +100,105 @@ tr.suspect .detail, tr.ng .detail { color: inherit; }
 .gate-panel p { margin: 0; color: var(--dim); font-size: 13px; text-align: left; }
 .gate-buttons { display: flex; gap: 10px; justify-content: center; margin-top: 18px; }
 .gate-note { margin-top: 12px !important; font-size: 11.5px; }
+
+/* グラフのタイル(板集計) ----------------------------------------
+ *
+ * **並べて見せます。** VBA は1枚ずつ切り替える作りでしたが、それだと
+ * 隣が見えません ──「重量は出ているのに稼働率が低い」は並べて初めて
+ * 分かります。
+ *
+ * 色は `tokens.css`。ここに色を書きません(意味と色を2か所に分けない)。
+ */
+.gtiles {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+.gtile {
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 12px 14px; background: var(--bg); min-width: 0;
+}
+.gtile--wide { grid-column: span 2; }
+.gtile--full { grid-column: 1 / -1; }
+@media (max-width: 720px) {
+  .gtile--wide, .gtile--full { grid-column: 1 / -1; }
+}
+.gtile__head { display: flex; justify-content: space-between; gap: 8px;
+  align-items: baseline; margin-bottom: 8px; }
+.gtile__head h3 { margin: 0; font-size: 13px; }
+.gtile__note { font-size: 11px; color: var(--dim); text-align: right; }
+.gtile__value {
+  display: block; font-size: 26px; font-weight: 700; line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.gtile__unit { font-size: 11.5px; color: var(--dim); }
+.gtile__empty { margin: 0; font-size: 12px; color: var(--dim); }
+/* 数字の色は**量の種類**で分けます(7つ同じ色だと目が滑ります) */
+.gtile[data-tone="qty"]  .gtile__value { color: var(--qty); }
+.gtile[data-tone="dur"]  .gtile__value { color: var(--dur); }
+.gtile[data-tone="stop"] .gtile__value { color: var(--stop); }
+
+/* 絵 ------------------------------------------------------------- */
+.chart { width: 100%; height: auto; }
+.chart .gridline { stroke: var(--line); stroke-width: 1; }
+.chart .axis { stroke: var(--dim); stroke-width: 1; }
+.chart .label { fill: var(--dim); font-size: 10px; }
+
+/* なかまの印 ── **色はここだけ**(JSは class 名を書くだけ)
+ *
+ * 印は「この要素の色は `--c`」とだけ言います。棒・線・点・扇は
+ * `var(--c, …)` で受けます ── こうしないと、`.chart .bar` と
+ * `.mark-cat-1` のどちらが強いかの勝負になり、**印が効かずに全部が
+ * 同じ色**になったり、折れ線が塗り潰されたりします(どちらも一度
+ * そうなりました)。印が無ければ地の色(`--accent`)です。
+ */
+.mark-qty { --c: var(--qty); }
+.mark-dur { --c: var(--dur); }
+.mark-stop { --c: var(--stop); }
+.mark-goal { --c: var(--goal); }
+.mark-cumulative { --c: var(--cumulative); }
+.mark-shift-1 { --c: var(--shift-1); }
+.mark-shift-2 { --c: var(--shift-2); }
+.mark-shift-3 { --c: var(--shift-3); }
+.mark-shift-day { --c: var(--shift-day); }
+.mark-cat-1 { --c: var(--cat-1); }
+.mark-cat-2 { --c: var(--cat-2); }
+.mark-cat-3 { --c: var(--cat-3); }
+.mark-cat-4 { --c: var(--cat-4); }
+.mark-cat-5 { --c: var(--cat-5); }
+.mark-cat-6 { --c: var(--cat-6); }
+.mark-cat-7 { --c: var(--cat-7); }
+.mark-cat-8 { --c: var(--cat-8); }
+.mark-cat-9 { --c: var(--cat-9); }
+.mark-cat-10 { --c: var(--cat-10); }
+
+.chart .bar { fill: var(--c, var(--accent)); stroke: none; }
+.chart .line {
+  fill: none;                          /* 折れ線は**塗りません** */
+  stroke: var(--c, var(--accent)); stroke-width: 2;
+}
+/* 線の縁取り(地の色で太く)。**棒を横切るところで溶けないため** */
+.chart .line--halo { stroke: var(--bg); stroke-width: 5; }
+.chart .dot {
+  fill: var(--c, var(--accent)); stroke: var(--bg); stroke-width: 1.5;
+}
+
+/* ドーナツ ------------------------------------------------------- */
+.donut { width: 100%; max-width: 200px; height: auto; display: block;
+  margin: 0 auto; }
+.donut__slice { fill: var(--c, var(--accent));
+  stroke: var(--bg); stroke-width: 1; }
+.donut__ring { fill: none; stroke: var(--c, var(--accent)); }
+.donut__empty { fill: none; stroke: var(--line); }
+.donut__total { fill: var(--text); font-size: 20px; font-weight: 700; }
+.donut__unit { fill: var(--dim); font-size: 10px; }
+
+/* 凡例。**色だけでは何の色か分からない** */
+.dlg { list-style: none; margin: 8px 0 0; padding: 0; font-size: 11.5px; }
+.dlg li { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
+.dlg__swatch {
+  width: 10px; height: 10px; border-radius: 2px; flex: none;
+  background: var(--c, var(--accent));
+}
+.dlg__swatch--line { height: 3px; border-radius: 2px; }
+.dlg__text { color: var(--dim); }
+.dlg b { margin-left: auto; font-variant-numeric: tabular-nums; }

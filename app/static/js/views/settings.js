@@ -8,7 +8,7 @@ import { api, reason } from "../api.js";
 import * as toast from "../toast.js";
 
 const FIELDS = ["input_dir", "output_dir", "line", "ref_dir", "stop_csv",
-                "log_dir"];
+                "plate_dir", "log_dir"];
 const $ = (id) => document.getElementById(id);
 
 function show(data) {
@@ -34,6 +34,7 @@ function show(data) {
     logNote.hidden = !why;
     logNote.textContent = why;
   }
+  showDistribution(data.distribution || {});
   (data.paths || []).forEach((item) => {
     const hint = $("hint-" + item.key);
     if (!hint) { return; }
@@ -44,6 +45,62 @@ function show(data) {
       ? data.logs.folder : item.resolved;
     hint.textContent = where + (item.note ? " ── " + item.note : "");
     hint.className = "hint " + (item.exists ? "ok" : (item.note ? "bad" : ""));
+  });
+}
+
+/**
+ * 配布設定の様子。**どの値が配布設定から来たのか**まで出します。
+ *
+ * 札を出すのは、「この端末で打った覚えがないのに値が入っている」を
+ * 不思議なままにしないためです ── 配った値だと分かれば、直してよいか
+ * (配り直されると戻るのか)の見当が付きます。
+ */
+function showDistribution(state) {
+  const dir = $("dist-dir");
+  if (!dir) { return; }
+  dir.textContent = state.dir || "";
+  $("dist-state").textContent = state.problem
+    ? "── " + state.problem
+    : (state.exists ? "── あります" : "── まだありません");
+  const host = $("dist-items");
+  host.replaceChildren();
+  const came = state.from_distribution || [];
+  (state.items || []).forEach((item) => {
+    const row = document.createElement("label");
+    row.className = "dist-item";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = item.key;
+    box.checked = !!item.default && !!item.value;
+    box.disabled = !item.value;             // 空の項目は配れません
+    const name = document.createElement("b");
+    name.textContent = item.label;
+    const value = document.createElement("span");
+    value.textContent = item.value || "(空)";
+    row.append(box, name, value);
+    if (came.includes(item.key)) {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = "配布設定の値";
+      row.append(tag);
+    }
+    host.append(row);
+  });
+}
+
+function distribute(what) {
+  const items = Array.from(
+    document.querySelectorAll("#dist-items input:checked")).map((b) => b.value);
+  if (what === "forget"
+      && !window.confirm("配布設定を消します(この端末の設定はそのままです)。"
+                         + "よろしいですか?")) { return; }
+  api("/api/distribution", { json: { what, items } }).then((result) => {
+    const data = result.data || {};
+    if (!result.ok) { return toast.bad("dist-msg", reason(result)); }
+    show(data);
+    const said = (data.distribution_result || {}).message || data.message || "";
+    if (data.ok) { toast.ok("dist-msg", said, 8000); }
+    else { toast.bad("dist-msg", said); }
   });
 }
 
@@ -73,5 +130,8 @@ export function wire() {
   $("save").addEventListener("click", save);
   $("open-out").addEventListener("click", () => open("out"));
   $("open-logs").addEventListener("click", () => open("logs"));
+  $("dist-export").addEventListener("click", () => distribute("export"));
+  $("dist-reload").addEventListener("click", () => distribute("reload"));
+  $("dist-forget").addEventListener("click", () => distribute("forget"));
   return load();
 }

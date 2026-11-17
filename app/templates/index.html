@@ -1,13 +1,20 @@
 <!--
   変換の画面(中身)
 
-  外枠は `base.html`。設定部は共通で、その下を**タブで2つに分けて**います。
+  外枠は `base.html`。**タブで4つに分けて**います。
 
     変換             … 1日・1ラインごとに4本組のCSV(日報管理ツールと同じ)
     機側データ集計    … VBAと同じ転記を1本のCSVに(Excelでも、前に出したCSVでも)
+    板集計           … 日ごとのCSVを期間ぶん1つにまとめ、グラフにする
+    設定             … どこを読んで、どこへ出すか + 配布設定
+
+  **設定はタブにしました。** 前は上に固定していたので、開くたびに設定が
+  最初に目に入り、やることの画面まで下へ送られていました ── 設定を触るのは
+  据え付けのときと置き場所が変わったときだけです。
 
   進捗と結果は**1か所**です ── 走るのは一度に1つだけなので、どちらのタブから
-  始めても同じ場所に出ます。
+  始めても同じ場所に出ます(板集計と設定のタブでは隠します。走っている間は
+  どのタブでも出します)。
 
   **この画面は1枚しか開けません。** 2枚開けると同じ作業状態を奪い合う
   ので、開くこと自体をお断りします。判定はサーバ
@@ -16,94 +23,16 @@
 -->
 <main hidden id="main">
 
-  <!-- 設定部 ---------------------------------------------------- -->
-  <section class="card">
-    <div class="card-head">
-      <h2>設定</h2>
-      <p>どこを読んで、どこへ出すかを決めます。保存するとこの端末に残ります。</p>
-    </div>
-
-    <div class="fields">
-      <label class="field">
-        <span class="label">入力フォルダ<em>任意</em></span>
-        <input type="text" id="input_dir" spellcheck="false"
-               placeholder="例: \\サーバ\共有\日報\2026.08">
-        <span class="hint" id="hint-input_dir"></span>
-        <span class="hint">ドラッグで入れるなら<b>空のままで構いません</b>。
-          共有に溜まったブックをドラッグせずに読むとき、変換タブで
-          「入力フォルダをそのまま読む」を選ぶと、ここを読みます。</span>
-      </label>
-
-      <label class="field">
-        <span class="label">出力先フォルダ<em>必須</em></span>
-        <input type="text" id="output_dir" spellcheck="false"
-               placeholder="例: D:\CSV出力">
-        <span class="hint" id="hint-output_dir"></span>
-      </label>
-
-      <label class="field">
-        <span class="label">ライン</span>
-        <input type="text" id="line" spellcheck="false" list="lines"
-               placeholder="空ならシートの呼び名から当てます(機側 → LS)">
-        <datalist id="lines">
-          <option value="LS"></option><option value="HVC"></option>
-        </datalist>
-        <span class="hint">当たらなかったときだけ指定してください。</span>
-      </label>
-
-      <label class="field">
-        <span class="label">参照用マスタの置き場所<em>任意</em></span>
-        <input type="text" id="ref_dir" spellcheck="false"
-               placeholder="伝送用ファイル.sqlite3 が入っているフォルダ">
-        <span class="hint" id="hint-ref_dir"></span>
-        <span class="hint">停止の「内訳」名(休憩食事 など)の出どころです。
-          読めなくても変換は止まりません ── 空になるのは内訳の1列だけです。</span>
-      </label>
-
-      <label class="field">
-        <span class="label">停止内訳CSVの置き場所<em>任意</em></span>
-        <input type="text" id="stop_csv" spellcheck="false"
-               placeholder="フォルダでも、停止内訳.csv そのものでも">
-        <span class="hint" id="hint-stop_csv"></span>
-        <span class="hint">メモ帳で直せる一覧です。<b>分類ごとに、ここに行が
-          あればマスタより先に読みます</b>。空なら参照用マスタの置き場所の
-          <code>停止内訳.csv</code> を見ます。</span>
-      </label>
-      <label class="field">
-        <span class="label">ログの置き場所<em>任意</em></span>
-        <input type="text" id="log_dir" spellcheck="false"
-               placeholder="空ならこの端末の中(ログを開く で見られます)">
-        <span class="hint" id="hint-log_dir"></span>
-        <span class="hint">共有へ集めたいときに指定します。
-          <b>指した先にツール名のフォルダを作り、その中へ出します</b> ──
-          ほかのツールのログと混ざらないように、
-          <b>ファイル名もツール名から始めます</b>(1本取り出したときに、
-          開かなくても分かるように)。
-          <code>&lt;指した先&gt;\ExcelCsvConverter\ExcelCsvConverter_app.log</code>
-          (筋道)/<code>_error.log</code>(うまくいかなかったことだけ)/
-          <code>_launcher.log</code>(起動)の3本です。
-          書けない場所ならこの端末の中へ戻し、その理由も残します。</span>
-      </label>
-    </div>
-
-    <div class="notice" id="stop-reasons"></div>
-    <div class="notice warn" id="log-note" hidden></div>
-
-    <div class="row">
-      <button class="primary" id="save">設定を保存</button>
-      <button id="open-out">出力先を開く</button>
-      <button id="open-logs">ログを開く</button>
-      <span class="msg" id="settings-msg"></span>
-    </div>
-  </section>
-
-
   <!-- タブ ------------------------------------------------------ -->
   <nav class="tabs" role="tablist" aria-label="やること">
     <button class="tab on" id="tab-convert" data-tab="convert"
             role="tab" aria-selected="true">変換</button>
     <button class="tab" id="tab-tally" data-tab="tally"
             role="tab" aria-selected="false">機側データ集計</button>
+    <button class="tab" id="tab-plate" data-tab="plate"
+            role="tab" aria-selected="false">板集計</button>
+    <button class="tab" id="tab-settings" data-tab="settings"
+            role="tab" aria-selected="false">設定</button>
   </nav>
 
   <!-- 変換タブ --------------------------------------------------- -->
@@ -242,7 +171,193 @@
     </section>
   </div>
 
+  <!-- 板集計タブ -------------------------------------------------- -->
+  <div class="panel" id="panel-plate" role="tabpanel" hidden>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>読むところ</h2>
+        <p>設定タブの<b>板データ参照パス</b>の下を読みます。
+           配下は<b>ラインごとのフォルダ</b>で、その中の
+           <code>集計\年.月\日</code> に日ごとのCSVが入っている形です
+           (日報管理ツールが書いた形。このツールの変換タブが出す4本組も
+           同じ形なので、どちらも読めます)。</p>
+      </div>
+
+      <div class="notice warn" id="plate-problem" hidden></div>
+      <p class="hint">参照先: <span id="plate-base"></span></p>
+
+      <div class="row">
+        <b class="label">ライン</b>
+        <button id="plate-all" class="ghost">ぜんぶ選ぶ</button>
+        <button id="plate-reload" class="ghost">一覧を読み直す</button>
+      </div>
+      <div class="line-picks" id="plate-lines"></div>
+
+      <div class="fields">
+        <label class="field">
+          <span class="label">期間(から)</span>
+          <input type="date" id="plate-start">
+        </label>
+        <label class="field">
+          <span class="label">期間(まで)</span>
+          <input type="date" id="plate-end">
+        </label>
+      </div>
+      <p class="hint">一度に <b id="plate-max">400</b> 日まで。
+        日のフォルダの名前で絞るので、広い期間を指しても
+        <b>読むのはその期間のCSVだけ</b>です。</p>
+
+      <div class="row">
+        <button class="primary big" id="plate-run">グラフを出す</button>
+        <button id="plate-csv">CSVで出す</button>
+        <button id="plate-xlsx">Excelで出す(グラフ付き)</button>
+        <span class="msg" id="plate-msg"></span>
+      </div>
+      <p class="hint"><b>CSVのときグラフは付きません</b>(表だけの形です)。
+        Excel のグラフは<b>画像ではなく本物のグラフ</b>で、集計シートの
+        セルを指しています ── 受け取った人が期間を絞ったり系列を足したり
+        できます。出す先は設定タブの「出力先フォルダ」です
+        (<b>ブラウザへダウンロードはしません</b>)。</p>
+      <div class="notice warn" id="plate-skipped" hidden></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>まとめたもの</h2>
+        <p><span id="plate-note"></span>　<span class="hint" id="plate-summary"></span></p>
+      </div>
+      <div class="gtiles" id="plate-tiles"></div>
+    </section>
+  </div>
+
+  <!-- 設定タブ ---------------------------------------------------- -->
+  <div class="panel" id="panel-settings" role="tabpanel" hidden>
+  <!-- 設定部 ---------------------------------------------------- -->
+  <section class="card">
+    <div class="card-head">
+      <h2>設定</h2>
+      <p>どこを読んで、どこへ出すかを決めます。保存するとこの端末に残ります。</p>
+    </div>
+
+    <div class="fields">
+      <label class="field wide">
+        <span class="label">入力フォルダ<em>任意</em></span>
+        <input type="text" id="input_dir" spellcheck="false"
+               placeholder="例: \\サーバ\共有\日報\2026.08">
+        <span class="hint" id="hint-input_dir"></span>
+        <span class="hint">ドラッグで入れるなら<b>空のままで構いません</b>。
+          共有に溜まったブックをドラッグせずに読むとき、変換タブで
+          「入力フォルダをそのまま読む」を選ぶと、ここを読みます。</span>
+      </label>
+
+      <label class="field wide">
+        <span class="label">出力先フォルダ<em>必須</em></span>
+        <input type="text" id="output_dir" spellcheck="false"
+               placeholder="例: D:\CSV出力">
+        <span class="hint" id="hint-output_dir"></span>
+      </label>
+
+      <label class="field">
+        <span class="label">ライン</span>
+        <input type="text" id="line" spellcheck="false" list="lines"
+               placeholder="空ならシートの呼び名から当てます(機側 → LS)">
+        <datalist id="lines">
+          <option value="LS"></option><option value="HVC"></option>
+        </datalist>
+        <span class="hint">当たらなかったときだけ指定してください。</span>
+      </label>
+
+      <label class="field wide">
+        <span class="label">参照用マスタの置き場所<em>任意</em></span>
+        <input type="text" id="ref_dir" spellcheck="false"
+               placeholder="伝送用ファイル.sqlite3 が入っているフォルダ">
+        <span class="hint" id="hint-ref_dir"></span>
+        <span class="hint">停止の「内訳」名(休憩食事 など)の出どころです。
+          読めなくても変換は止まりません ── 空になるのは内訳の1列だけです。</span>
+      </label>
+
+      <label class="field wide">
+        <span class="label">停止内訳CSVの置き場所<em>任意</em></span>
+        <input type="text" id="stop_csv" spellcheck="false"
+               placeholder="フォルダでも、停止内訳.csv そのものでも">
+        <span class="hint" id="hint-stop_csv"></span>
+        <span class="hint">メモ帳で直せる一覧です。<b>分類ごとに、ここに行が
+          あればマスタより先に読みます</b>。空なら参照用マスタの置き場所の
+          <code>停止内訳.csv</code> を見ます。</span>
+      </label>
+      <label class="field wide">
+        <span class="label">板データ参照パス<em>任意</em></span>
+        <input type="text" id="plate_dir" spellcheck="false"
+               placeholder="例: \\日報管理\集計CSV・印刷用HTML">
+        <span class="hint" id="hint-plate_dir"></span>
+        <span class="hint"><b>板集計タブが読む根</b>です。この下が
+          ラインごとのフォルダ(<code>L-1</code> など)で、その中の
+          <code>集計\2026.11\17</code> に日ごとのCSVが入っている形
+          (日報管理ツールが書いた形)。</span>
+      </label>
+      <label class="field wide">
+        <span class="label">ログの置き場所<em>任意</em></span>
+        <input type="text" id="log_dir" spellcheck="false"
+               placeholder="空ならこの端末の中(ログを開く で見られます)">
+        <span class="hint" id="hint-log_dir"></span>
+        <span class="hint">共有へ集めたいときに指定します。
+          <b>指した先にツール名のフォルダを作り、その中へ出します</b> ──
+          ほかのツールのログと混ざらないように、
+          <b>ファイル名もツール名から始めます</b>(1本取り出したときに、
+          開かなくても分かるように)。
+          <code>&lt;指した先&gt;\ExcelCsvConverter\ExcelCsvConverter_app.log</code>
+          (筋道)/<code>_error.log</code>(うまくいかなかったことだけ)/
+          <code>_launcher.log</code>(起動)の3本です。
+          書けない場所ならこの端末の中へ戻し、その理由も残します。</span>
+      </label>
+    </div>
+
+    <div class="notice" id="stop-reasons"></div>
+    <div class="notice warn" id="log-note" hidden></div>
+
+    <div class="row">
+      <button class="primary" id="save">設定を保存</button>
+      <button id="open-out">出力先を開く</button>
+      <button id="open-logs">ログを開く</button>
+      <span class="msg" id="settings-msg"></span>
+    </div>
+  </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>配布設定</h2>
+        <p>1台で決めた設定を、<b>配った先の端末でそのまま使う</b>ための
+           ものです。設定はこの端末の中に入るので、ツールのフォルダを
+           コピーしても付いて行きません ── 配った先で1台ずつ打ち直すと、
+           1字違う端末が「集計が出ない理由の分からないまま」使われます。</p>
+      </div>
+
+      <p class="hint">置き場所: <span id="dist-dir"></span>
+        　<b id="dist-state"></b></p>
+
+      <div class="dist-items" id="dist-items"></div>
+
+      <div class="row">
+        <button class="primary" id="dist-export">配布設定を書き出す</button>
+        <button id="dist-reload">配布設定を読み込み直す</button>
+        <button id="dist-forget" class="ghost">配布設定を消す</button>
+        <span class="msg" id="dist-msg"></span>
+      </div>
+
+      <div class="notice">
+        <b>上書きしません。</b> 配った先では、その端末で<b>まだ決まっていない項目だけ</b>を埋めます(空は「無い」と数えます)。
+        前に配った値のままなら、配り直した新しい値に置き換えます ── 読み込んだあとに端末で直した値は残します。
+        <b>揃えたいときは「読み込み直す」</b>(端末で決めた値も上書きします)。
+        配り方は、この<b>配布設定フォルダを含めて</b>ツールのフォルダをまるごとコピーするだけです(<code>Start.vbs</code> / <code>ExcelCsvConverter.exe</code> と同じ階層にあること)。
+      </div>
+    </section>
+  </div>
+
   <!-- 進捗と結果(共通) -------------------------------------------- -->
+  <!-- 板集計・設定のタブでは隠します(`layout.css`)。走っている間は
+       どのタブでも出します(`body.busy`) -->
+  <div id="running-area">
   <section class="card" id="running-card">
     <div class="card-head">
       <h2 id="running-title">進み具合</h2>
@@ -288,6 +403,8 @@
       </table>
     </div>
   </section>
+
+  </div>
 
   <footer class="foot">
     <button class="link" id="diag-toggle">診断情報</button>

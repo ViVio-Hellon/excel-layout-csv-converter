@@ -69,3 +69,53 @@ input[type=text]:focus { outline: 2px solid var(--accent); border-color: transpa
   content: ""; display: block; height: 2px; margin: 7px -18px -1px;
   background: var(--accent);
 }
+
+/* パスの欄は**横いっぱい** ---------------------------------------
+ *
+ * 共有の道(`\\サーバ\共有\日報管理\集計CSV・印刷用HTML`)は長いので、
+ * 2列に並べると**先のほうが見えません**。見えない道は直せないので、
+ * パスの欄だけ2列ぶんを使います(ラインのような短い欄はそのまま)。
+ */
+.field.wide { grid-column: 1 / -1; }
+.field.wide input[type=text] { font-size: 14px; padding: 9px 11px; }
+
+/* ラインの選び ---------------------------------------------------- */
+.line-picks {
+  display: grid; gap: 8px; margin: 10px 0 16px;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+}
+.line-pick {
+  display: flex; align-items: baseline; gap: 8px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--bg); font-size: 13px; cursor: pointer;
+}
+.line-pick b { font-size: 14px; }
+.line-pick span { color: var(--dim); font-size: 11.5px; }
+.line-pick.off { opacity: .55; cursor: default; }
+
+/* 板集計・設定のタブでは、進捗と結果を隠します。
+ * **走っている間はどのタブでも出します**(`body.busy`)── 変換を始めて
+ * から設定タブへ移っても、進み具合が見えなくなると不安になります */
+body[data-tab="plate"] #running-area,
+body[data-tab="settings"] #running-area { display: none; }
+body.busy #running-area { display: block; }
+
+/* 配布設定で配る項目 ---------------------------------------------- */
+.dist-items {
+  display: grid; gap: 6px; margin: 4px 0 14px;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+/* 項目名は上、いまの値はその下。**横に並べない** ── 共有の道は長く、
+ * 横並びだと名前が1字ずつ折り返されて読めません(一度そうなりました) */
+.dist-item {
+  display: grid; grid-template-columns: auto 1fr; gap: 2px 8px;
+  font-size: 12.5px; padding: 7px 9px; border: 1px solid var(--line);
+  border-radius: var(--radius-sm); background: var(--bg);
+}
+.dist-item input { grid-row: span 2; align-self: start; margin-top: 3px; }
+.dist-item b { font-size: 12.5px; }
+.dist-item span { color: var(--dim); word-break: break-all; font-size: 11.5px; }
+.dist-item .tag {
+  font-size: 10.5px; color: var(--accent); border: 1px solid currentColor;
+  border-radius: 3px; padding: 0 4px; white-space: nowrap;
+}

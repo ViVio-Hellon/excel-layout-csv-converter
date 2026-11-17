@@ -14,6 +14,7 @@ import * as tabs from "./tabs.js";
 import * as toast from "./toast.js";
 import * as settings from "./views/settings.js";
 import * as input from "./views/input.js";
+import * as plate from "./views/plate.js";
 import * as job from "./views/job.js";
 
 const $ = (id) => document.getElementById(id);
@@ -31,7 +32,8 @@ async function boot() {
 
   tabs.wire();
   wireShell();
-  await Promise.all([settings.wire(), input.wire(), job.wire()]);
+  await Promise.all([settings.wire(), input.wire(), job.wire(),
+                     plate.wire()]);
   startHeartbeat();
 }
 
