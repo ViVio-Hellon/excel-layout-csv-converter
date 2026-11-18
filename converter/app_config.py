@@ -154,6 +154,37 @@ def version_label() -> str:
     return f"VER{version()}"
 
 
+def exe_version() -> str:
+    r"""デスクトップ版の窓(exe)自身の版。ブラウザ版では空です。
+
+    窓(Rust)が起動のときに渡します(`XLCSV_EXE_VERSION`)。
+    """
+    return os.environ.get("XLCSV_EXE_VERSION", "").strip()
+
+
+def version_note() -> str:
+    r"""**exe と中身の版が違えば**その知らせ。同じ(かブラウザ版)なら空。
+
+    【なぜ要るか】
+    配るものは「exe 1つ」ではなく**フォルダまるごと**です。画面も変換も
+    Python 側(`app\` `converter\` `config\`)にあり、版の帯に出るのは
+    `config/app.json` の版です。
+
+    新しい exe だけを古いフォルダへ入れると、**窓は新しいのに中身は
+    古いまま**になります ── 画面には古い版が出るので「exe が古い」と
+    見えますが、本当は中身が古いのです(実際にそう見えました)。
+    気づけるように、ここで食い違いを言います。
+    """
+    exe = exe_version()
+    if not exe or exe == version():
+        return ""
+    # 画面の札(title)とログに出ます。**飾り字を入れません** ──
+    # そのまま読まれる場所なので、`**` が見えてしまいます
+    return (f"窓(exe)は VER{exe}、中身は VER{version()} です ── "
+            "フォルダの中身が古いままです。"
+            "配られたフォルダをまるごと入れ替えてください。")
+
+
 def version_problem() -> str:
     """版の書き方がおかしければ理由。正しければ空文字(起動は止めません)。"""
     text = version()
@@ -324,7 +355,8 @@ def describe() -> str:
     lines = [
         f"アプリID      : {app_id()}",
         f"表示名        : {display_name()}",
-        f"バージョン    : {version()}",
+        f"バージョン    : {version()}"
+        + (f"   窓(exe): {exe_version()}" if exe_version() else ""),
         f"監視レベル    : {monitor_level()}",
         f"設定ファイル  : {CONFIG_PATH}",
         f"アプリ本体    : {APP_ROOT}",
@@ -336,6 +368,8 @@ def describe() -> str:
         lines.append(f"【注意】{load_error()} — 既定値で動作しています")
     if version_problem():
         lines.append(f"【注意】{version_problem()}")
+    if version_note():
+        lines.append(f"【注意】{version_note()}")
     return "\n".join(lines)
 
 

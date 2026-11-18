@@ -103,3 +103,44 @@ class LaunchFileTests(unittest.TestCase):
     def test_呼ぶ先が実在する(self) -> None:
         for name in ("start_app.py", "process_manager.py"):
             self.assertTrue((ROOT / name).is_file(), name)
+
+
+class DistributionListTests(unittest.TestCase):
+    r"""配るもの(Actions の「フォルダまるごと」)に**取りこぼしが無いか**
+
+    配るのは exe 1つではありません ── 画面も変換も Python 側にあります。
+    新しい exe だけを古いフォルダへ入れると、窓は新しいのに中身は古いまま
+    になり、**画面には古い版が出ます**(1.13.2 の exe でそう見えました)。
+
+    取りこぼすと「配ったのに起動しない」になるので、**根に置いてある
+    モジュールが全部入っているか**をここで見ます。
+    """
+
+    ROOT = Path(__file__).resolve().parent.parent
+    WORKFLOW = ROOT / ".github" / "workflows" / "デスクトップ版をつくる.yml"
+
+    #: 配らないもの(配った先では使いません)
+    NOT_SHIPPED = {"stop.py"}
+
+    def test_根のモジュールは全部配る(self) -> None:
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        missing = []
+        for path in sorted(self.ROOT.glob("*.py")):
+            if path.name in self.NOT_SHIPPED:
+                continue
+            if f'"{path.name}"' not in text:
+                missing.append(path.name)
+        self.assertEqual(missing, [],
+                         "配るものの一覧に入っていません"
+                         "(.github/workflows/デスクトップ版をつくる.yml)")
+
+    def test_フォルダも全部配る(self) -> None:
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        for name in ("app", "converter", "config", "vendor", "docs"):
+            self.assertIn(f'"{name}"', text, f"{name} を配っていません")
+
+    def test_起動するものと止めるものが入っている(self) -> None:
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        for name in ("Start.vbs", "start.bat", "stop.bat",
+                     "ExcelCsvConverter.exe"):
+            self.assertIn(name, text, f"{name} を配っていません")

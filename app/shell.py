@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import html
 import json
 import urllib.parse
 from pathlib import Path
@@ -50,6 +51,15 @@ def boot_values(config: dict) -> dict:
     }
 
 
+def _version_note() -> str:
+    """版の食い違いの知らせ(帯に出す札)。**ふだんは何も出しません。**"""
+    note = app_config.version_note()
+    if not note:
+        return ""
+    return (f'<span class="badge warn" title="{html.escape(note)}">'
+            f"中身が古いままです</span>")
+
+
 def render(page: str, config: dict, **values) -> str:
     """`base.html` に `page` を差し込んで返す。"""
     body = (TEMPLATE_DIR / page).read_text(encoding="utf-8")
@@ -58,6 +68,8 @@ def render(page: str, config: dict, **values) -> str:
     fields = {
         "APP_NAME": config["DISPLAY_NAME"],
         "VERSION": app_config.version_label(),
+        # exe と中身の版が食い違っていれば、帯に出します(ふだんは空)
+        "VERSION_NOTE": _version_note(),
         # `data:` に埋めるので、ここで符号化して渡す
         "FAVICON": urllib.parse.quote(favicon()),
         "BOOT": json.dumps(boot_values(config), ensure_ascii=False),

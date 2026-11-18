@@ -197,6 +197,8 @@ def diagnostics(request: Request) -> Response:
         "local_root": str(app_config.local_root()),
         "config_error": app_config.load_error(),
         "version_problem": app_config.version_problem(),
+        # exe と中身の版の食い違い(デスクトップ版だけ。ふだんは空)
+        "version_note": app_config.version_note(),
         "intake": str(intake.folder()),
         "idle": request.app.idle.status() if request.app.idle else {},
         # **スリープから戻ったことも出します** ── 「勝手に終わった」

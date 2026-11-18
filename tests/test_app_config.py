@@ -124,3 +124,49 @@ class VersionAgreementTests(unittest.TestCase):
         self.assertEqual(self._json_version("src-tauri/tauri.conf.json"), app)
         self.assertEqual(self._cargo_version(), app)
         self.assertEqual(self._lock_version(), app)
+
+
+class ExeVersionTests(unittest.TestCase):
+    r"""**exe と中身の版が違えば言います**
+
+    配るのはフォルダまるごとですが、exe だけを古いフォルダへ入れることが
+    できてしまいます。そのとき画面に出るのは中身の版なので、「exe が
+    古い」に見えます ── 本当は中身が古いのです。気づけるように言います。
+    """
+
+    def setUp(self) -> None:
+        app_config.load(force=True)
+        self.addCleanup(app_config.load, force=True)
+        self._before = os.environ.get("XLCSV_EXE_VERSION")
+        self.addCleanup(self._restore)
+
+    def _restore(self) -> None:
+        if self._before is None:
+            os.environ.pop("XLCSV_EXE_VERSION", None)
+        else:
+            os.environ["XLCSV_EXE_VERSION"] = self._before
+
+    def test_ブラウザ版では何も言わない(self) -> None:
+        os.environ.pop("XLCSV_EXE_VERSION", None)
+        self.assertEqual(app_config.exe_version(), "")
+        self.assertEqual(app_config.version_note(), "")
+
+    def test_同じ版なら何も言わない(self) -> None:
+        os.environ["XLCSV_EXE_VERSION"] = app_config.version()
+        self.assertEqual(app_config.version_note(), "")
+
+    def test_違えば両方の版を出す(self) -> None:
+        os.environ["XLCSV_EXE_VERSION"] = "9.9.9"
+        note = app_config.version_note()
+        self.assertIn("VER9.9.9", note)
+        self.assertIn(f"VER{app_config.version()}", note)
+        self.assertIn("まるごと", note)            # どうすればよいかまで
+        # 診断情報にも出します
+        self.assertIn("窓(exe)", app_config.describe())
+
+    def test_窓が渡す版はexeの版そのもの(self) -> None:
+        """Rust 側が `CARGO_PKG_VERSION` を渡しています。"""
+        rust = (Path(__file__).resolve().parent.parent / "src-tauri" / "src"
+                / "bridge.rs").read_text(encoding="utf-8")
+        self.assertIn('.env("XLCSV_EXE_VERSION", env!("CARGO_PKG_VERSION"))',
+                      rust)

@@ -10,7 +10,10 @@
 #   手で実行            … Actions → この流れ → Run workflow
 #
 # 終わったら、その実行の画面の下の Artifacts から
-# ExcelCsvConverter-windows を取ります。
+# **ExcelCsvConverter-windows-<版>** を取ります ── exe だけでなく
+# **配るフォルダまるごと**(画面・変換・設定・写しの日報管理ツール)が
+# 入っています。新しい exe だけを古いフォルダへ入れると、窓は新しいのに
+# 中身が古いままになります(画面には古い版が出ます)。
 #
 # Python は**同梱しません**(端末の Python を使います)。ここで作るのは
 # 窓だけです。
@@ -63,10 +66,47 @@ jobs:
           "版: $v" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
           "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: 成果物として残す
+      # **配るのはフォルダまるごと**です(exe 1つではありません)。
+      #
+      # 画面も変換も Python 側(app\ converter\ config\ vendor\)にあり、
+      # 版の帯に出るのは config/app.json の版です。新しい exe だけを古い
+      # フォルダへ入れると、窓は新しいのに中身は古いまま ── 画面には古い
+      # 版が出ます(実際にそうなりました)。だから一式で出します。
+      - name: 配るものを1つのフォルダにまとめる
+        shell: pwsh
+        run: |
+          $dist = "dist/ExcelCsvConverter"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item src-tauri/target/release/ExcelCsvConverter.exe $dist
+          foreach ($name in @("app", "converter", "config", "vendor", "docs")) {
+            Copy-Item $name $dist -Recurse
+          }
+          foreach ($name in @("Start.vbs", "start.bat", "stop.bat",
+                              "start_app.py", "bridge.py", "server.py",
+                              "boot_server.py", "convert.py", "launch_guard.py",
+                              "process_manager.py", "README.md",
+                              "VENDOR.md", "requirements.txt")) {
+            if (Test-Path $name) { Copy-Item $name $dist }
+          }
+          # 配った先に要らないもの(作業中の写し)は入れません
+          Get-ChildItem $dist -Recurse -Directory -Filter "__pycache__" |
+            Remove-Item -Recurse -Force
+          "中身: " + ((Get-ChildItem $dist | Measure-Object).Count) + " 個" |
+            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: 配るもの(フォルダまるごと)
         uses: actions/upload-artifact@v4
         with:
-          name: ExcelCsvConverter-windows
+          name: ExcelCsvConverter-windows-${{ env.VERSION }}
+          path: dist/ExcelCsvConverter
+          if-no-files-found: error
+
+      # exe だけ要るとき(中身を入れ替えずに窓だけ差し替える場合)。
+      # **ふだんは上のフォルダのほうを使ってください**
+      - name: exe だけ
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExcelCsvConverter-exe-only-${{ env.VERSION }}
           path: src-tauri/target/release/ExcelCsvConverter.exe
           if-no-files-found: error
 

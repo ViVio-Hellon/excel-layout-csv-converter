@@ -230,6 +230,9 @@ impl Bridge {
             // ── Python の親は `py.exe` のこともあるので、親の番号では
             // なくこれを渡します(`bridge.py` の `exe_pid`)
             .env("XLCSV_EXE_PID", std::process::id().to_string())
+            // 窓自身の版。**中身(config/app.json)と食い違えば画面が言います**
+            // ── 新しい exe だけを古いフォルダへ入れたときに気づけるように
+            .env("XLCSV_EXE_VERSION", env!("CARGO_PKG_VERSION"))
             .env("PYTHONIOENCODING", "utf-8")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

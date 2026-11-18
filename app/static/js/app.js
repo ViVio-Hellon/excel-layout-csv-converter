@@ -85,7 +85,7 @@ function showDiagnostics() {
       "PID           : " + data.pid,
       "ログ          : " + (data.logs || {}).folder,
       "受け取り置き場: " + data.intake,
-      data.config_error, data.version_problem,
+      data.config_error, data.version_problem, data.version_note,
     ].filter(Boolean).join("\n");
     box.hidden = false;
   });
