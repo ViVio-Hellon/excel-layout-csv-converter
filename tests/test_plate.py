@@ -335,10 +335,13 @@ class WriteTests(WebCase):
         self.assertTrue(refs)
         for ref in refs:
             self.assertTrue(ref.startswith("'集計'!$"), ref)
-        # 見出しの行と、中身の行がずれていないこと(覚え書きのぶん下がる)
+        # 見出しの行と、中身の行がずれていないこと(覚え書きのぶん下がる)。
+        # 集計シートは**1行=1日**なので、行数は日数ぶんです
         rows = {int(n) for ref in refs for n in re.findall(r"\$(\d+)", ref)}
-        self.assertIn(max(rows), {len(self.got.rows) + min(rows) + 1,
-                                  len(self.got.rows) + min(rows)})
+        days = len(self.got.dates)
+        # いちばん小さい行は**見出し**(系列の名前が指す行)、そこから
+        # 日数ぶんが中身です
+        self.assertEqual(max(rows) - min(rows), days)
 
     def test_シートは絵から入る並び(self) -> None:
         written = plate_out.write(self.got, self.out, kind="xlsx",
@@ -484,3 +487,163 @@ class RouteTests(WebCase):
         self.assertIn("読める集計がありませんでした", data["message"])
         self.assertFalse(list((self.tmp / "出力").glob("*.csv"))
                          if (self.tmp / "出力").is_dir() else [])
+
+
+class ExcelShapeTests(WebCase):
+    r"""Excel の作りは、**VBAが出していた月別集計のブックに合わせます**
+
+    現場から出た指摘は3つでした。
+
+        稼働率と生産性のスケールが合っていない(生産性が折れ線に見えない)
+        直別の重量・枚数が直別になっていない
+        停止の分類は円グラフにしてほしい
+
+    どれも**集計シートの形**から来ていました。向こうのブックは
+    **1行=1日**で、直は行ではなく**列**で分かれています ── 直を行に
+    持ったままでは、グラフの系列を直ごとに分けられません。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.tmp / "板"
+        self.base.mkdir()
+        for day in (1, 2, 3):
+            write_day(self.base, "L-1", f"2026-11-{day:02d}")
+        self.got = plate_source.collect(self.base, ["L-1"], DAY1, DAY30)
+        self.out = self.tmp / "出力"
+
+    def book(self, collected=None) -> dict[str, str]:
+        written = plate_out.write(collected or self.got, self.out, kind="xlsx",
+                                  start="2026-11-01", end="2026-11-30")
+        with zipfile.ZipFile(written["path"]) as zf:
+            return {name: zf.read(name).decode("utf-8")
+                    for name in zf.namelist()}
+
+    def charts(self, parts: dict[str, str]) -> dict[str, str]:
+        """題 → そのグラフの XML。"""
+        found = {}
+        for name, body in parts.items():
+            if not name.startswith("xl/charts/chart"):
+                continue
+            title = re.findall(r"<a:t>(.*?)</a:t>", body)[0]
+            found[title] = body
+        return found
+
+    # -- シートの形 --------------------------------------------------
+    def test_集計シートは1行が1日で直は列(self) -> None:
+        sheet = plate_out._daily_sheet(self.got, [])
+        self.assertEqual(len(sheet.rows), 3)          # 3日(直ごとの9行ではない)
+        for shift in ("1直", "2直", "3直"):
+            self.assertIn(f"{shift}合計(枚)", sheet.columns)
+            self.assertIn(f"{shift}合計(t)", sheet.columns)
+            self.assertIn(f"生産性{shift}(t/h)", sheet.columns)
+        self.assertEqual(sheet.columns[0], "日付")
+        self.assertNotIn("ライン", sheet.columns)     # 1ラインなら列を足さない
+
+    def test_ラインが複数ならライン列を足す(self) -> None:
+        write_day(self.base, "L-2", "2026-11-01")
+        got = plate_source.collect(self.base, ["L-1", "L-2"], DAY1, DAY30)
+        sheet = plate_out._daily_sheet(got, [])
+        self.assertEqual(sheet.columns[1], "ライン")
+        self.assertEqual(len(sheet.rows), 4)          # 3日 + L-2 の1日
+
+    def test_累計はラインごとに積む(self) -> None:
+        write_day(self.base, "L-2", "2026-11-01")
+        write_day(self.base, "L-2", "2026-11-02")
+        got = plate_source.collect(self.base, ["L-1", "L-2"], DAY1, DAY30)
+        sheet = plate_out._daily_sheet(got, [])
+        at = sheet.columns.index("日毎累計(枚)")
+        line_at = sheet.columns.index("ライン")
+        for name in ("L-1", "L-2"):
+            same = [r for r in sheet.rows if r[line_at] == name]
+            self.assertEqual(same[0][at] * 2, same[1][at])
+
+    def test_直の合計と全体の合計が合う(self) -> None:
+        sheet = plate_out._daily_sheet(self.got, [])
+        total = sheet.columns.index("合計(枚)")
+        parts = [sheet.columns.index(f"{s}合計(枚)")
+                 for s in ("1直", "2直", "3直")]
+        for row in sheet.rows:
+            self.assertEqual(row[total], sum(row[i] for i in parts))
+
+    # -- グラフ ------------------------------------------------------
+    def test_稼働率と生産性は別のグラフ(self) -> None:
+        """90 と 3 を同じ目盛りに乗せると、生産性が床に貼り付きます。"""
+        charts = self.charts(self.book())
+        self.assertIn("稼働率(％)", charts)
+        self.assertIn("生産性(t/h)", charts)
+        self.assertNotIn("稼働率と生産性", charts)
+        # 稼働率は折れ線1本、生産性は直ごとの棒
+        self.assertIn("lineChart", charts["稼働率(％)"])
+        self.assertEqual(charts["稼働率(％)"].count("<c:ser>"), 1)
+        self.assertIn("barChart", charts["生産性(t/h)"])
+        self.assertEqual(charts["生産性(t/h)"].count("<c:ser>"), 3)
+
+    def test_直別のグラフは直ごとに系列を分ける(self) -> None:
+        charts = self.charts(self.book())
+        for title in ("直重量(t)", "直枚数(枚)"):
+            body = charts[title]
+            self.assertEqual(body.count("<c:ser>"), 3, title)
+            names = re.findall(r"<c:tx><c:strRef><c:f>(.*?)</c:f>", body)
+            self.assertEqual(len(set(names)), 3, title)   # 別々の列を見ている
+
+    def test_停止の分類は円グラフ(self) -> None:
+        charts = self.charts(self.book())
+        pies = {t: b for t, b in charts.items() if "pieChart" in b}
+        self.assertTrue(pies)
+        for title, body in pies.items():
+            self.assertTrue(title.startswith("「"), title)
+            self.assertIn("'停止集計'!", body)
+            self.assertIn('<c:varyColors val="1"/>', body)
+            self.assertIn("<c:dPt>", body)          # 扇ごとに色を指す
+            self.assertNotIn("<c:catAx>", body)     # 円に軸はありません
+
+    def test_円グラフは分類ごとの行だけを見る(self) -> None:
+        sheet, spans = plate_out._stop_pie_sheet(self.got.stops)
+        self.assertEqual([kind for kind, _, _ in spans], ["管理ロス停止"])
+        charts = self.charts(self.book())
+        body = charts["「管理ロス停止」(分)"]
+        refs = re.findall(r"<c:f>'停止集計'!\$([A-Z])\$(\d+):\$[A-Z]\$(\d+)",
+                          body)
+        # 内訳の列(B)と分の列(D)を、同じ行の範囲で見ている
+        kinds = {col: (int(a), int(b)) for col, a, b in refs}
+        self.assertEqual(kinds["B"], kinds["D"])
+        self.assertEqual(kinds["B"][1] - kinds["B"][0] + 1, 2)   # 休憩食事・ﾌｫｰｸ待ち
+
+    def test_累積枚数は右の目盛りにする(self) -> None:
+        """直枚数(数百)と累積(数万)を同じ目盛りに乗せると読めません。"""
+        body = self.charts(self.book())["直枚数・累積枚数推移"]
+        self.assertIn("barChart", body)
+        self.assertIn("lineChart", body)
+        self.assertIn(xlsx_out.AX_VAL2, body)
+        self.assertIn('<c:crosses val="max"/>', body)
+        # 第2軸の横軸は**消します**(日付が2段に出てしまうため)
+        self.assertIn('<c:delete val="1"/>', body)
+
+    def test_系列の色は自前で指す(self) -> None:
+        """テーマを入れていないので、色を指さないと**白く塗られます**。"""
+        charts = self.charts(self.book())
+        for title, body in charts.items():
+            self.assertIn("<a:srgbClr val=", body, title)
+
+    def test_シートの並びは絵から(self) -> None:
+        parts = self.book()
+        names = re.findall(r'<sheet name="(.*?)"', parts["xl/workbook.xml"])
+        self.assertEqual(names, [xlsx_out.CHART_SHEET, plate_out.SHEET_DAILY,
+                                 plate_out.SHEET_STOP_TOTAL,
+                                 plate_out.SHEET_STOP, plate_out.SHEET_SOURCE])
+
+    def test_元のままの行も残す(self) -> None:
+        """数が合わないときに、どこで変わったのかを追えるように。"""
+        parts = self.book()
+        body = parts["xl/worksheets/sheet5.xml"]       # 元データ
+        self.assertIn("<t>1直</t>", body)
+        self.assertIn("<t>2026-11-01</t>", body)
+
+    def test_停止が無くても書ける(self) -> None:
+        for folder in self.base.rglob("停止内訳_*.csv"):
+            folder.unlink()
+        got = plate_source.collect(self.base, ["L-1"], DAY1, DAY30)
+        charts = self.charts(self.book(got))
+        self.assertFalse([t for t, b in charts.items() if "pieChart" in b])
+        self.assertIn("直重量(t)", charts)

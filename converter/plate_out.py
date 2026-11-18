@@ -34,9 +34,12 @@ log = get_logger("plate")
 PREFIX = "板集計"
 
 #: シートの名前。**グラフはこの名前で表を指します**
-SHEET_AGGREGATE = "集計"
-SHEET_STOP = "停止内訳"
-SHEET_STOP_TOTAL = "停止集計"
+SHEET_DAILY = "集計"                   # 1行=1日(直は列。VBAのブックと同じ)
+SHEET_STOP_TOTAL = "停止集計"          # 分類ごとの内訳(円グラフの材料)
+SHEET_STOP = "停止内訳"                # 読んだままの停止
+SHEET_SOURCE = "元データ"              # CSVで出すのと同じ行(直ごと)
+#: 前の名前(呼んでいる所が残っていないかを試験で見ます)
+SHEET_AGGREGATE = SHEET_DAILY
 
 
 def file_stem(lines: list[str], start: str, end: str) -> str:
@@ -109,56 +112,222 @@ def _sheet(name: str, columns: list[str], rows: list[dict[str, str]],
                           widths=widths, notes=notes)
 
 
-def _charts(sheet: xlsx_out.Sheet, columns: list[str]) -> list[xlsx_out.Chart]:
-    """集計シートの列から、グラフを組む。**無い列は飛ばします。**
+#: 日別シートの列。**VBAが出していた月別集計のブックに合わせます**
+#: (`docs/板集計.md` の「Excelの作り」)。向こうは
+#: `日付 / 合計(枚) / 合計(t) / 1直合計(枚) / 1直合計(t) / … /
+#:  作業時間合計(分) / 稼働時間合計(分) / 管理ロス停止(分) / 突発停止(分) /
+#:  ﾊﾝﾄﾞﾘﾝｸﾞ停止(分) / 稼働率(％) / 生産性1直(t/h) / … / 日毎累計(枚)`
+#: という並びで、**1行が1日**です ── 直は行ではなく**列**で分かれます。
+#: グラフが「直別」になるのはこの形だからで、直を行に持ったままでは
+#: 系列が分けられません(そこが食い違っていました)。
+COL_DATE = "日付"
+COL_LINE = "ライン"
+COL_SHEETS = "合計(枚)"
+COL_WEIGHT = "合計(t)"
+COL_WORK = "作業時間合計(分)"
+COL_OPERATING = "稼働時間合計(分)"
+COL_STOP = "停止合計(分)"
+COL_RATE = "稼働率(％)"
+COL_CUM_SHEETS = "日毎累計(枚)"
+COL_CUM_WEIGHT = "日毎累計(t)"
 
-    all-tools は列を足します(`その他(分)`)。位置ではなく**名前で**
-    探すので、足されても減っても組める範囲で組みます。
+#: 停止の分類の列(日別シート)。名前はVBAのブックに寄せます
+STOP_COLUMNS_OUT = (
+    ("管理ロス設備停止", "管理ロス停止(分)"),
+    ("段取り・突発停止", "突発停止(分)"),
+    ("ハンドリング停止", "ﾊﾝﾄﾞﾘﾝｸﾞ停止(分)"),
+    ("その他", "その他停止(分)"),
+)
+
+
+def _daily_sheet(collected: plate_source.Collected,
+                 notes: list[str]) -> xlsx_out.Sheet:
+    r"""**1行=1日**の集計シート(直は列で分かれます)。
+
+    ラインを2つ以上選んだときは「1行 = 1日 × 1ライン」にして、ライン名の
+    列を足します ── 混ぜて足すと、どのラインの直かが分からなくなります。
+
+    累計(`日毎累計`)は**ラインごと**に積みます。
     """
-    def column_of(name: str) -> int:
+    rows = plate_graph.shift_rows(collected.rows)
+    shifts = sorted({r.shift for r in rows if r.shift},
+                    key=plate_graph.shift_sort_key)
+    many = len(collected.lines) > 1
+
+    columns = [COL_DATE] + ([COL_LINE] if many else []) \
+        + [COL_SHEETS, COL_WEIGHT]
+    for shift in shifts:
+        columns += [f"{shift}合計(枚)", f"{shift}合計(t)"]
+    columns += [COL_WORK, COL_OPERATING]
+    columns += [label for _, label in STOP_COLUMNS_OUT]
+    columns += [COL_STOP, COL_RATE]
+    columns += [f"生産性{shift}(t/h)" for shift in shifts]
+    columns += [COL_CUM_SHEETS, COL_CUM_WEIGHT]
+
+    #: (日付, ライン) → その日の直の行
+    groups: dict[tuple[str, str], list] = {}
+    for row in rows:
+        groups.setdefault((row.date, row.line if many else ""), []).append(row)
+
+    running: dict[str, list[float]] = {}
+    body: list[list[object]] = []
+    for (day, line) in sorted(groups):
+        same = groups[(day, line)]
+        total_sheets = sum(r.sheets for r in same)
+        total_weight = sum(r.weight for r in same)
+        keep = running.setdefault(line, [0.0, 0.0])
+        keep[0] += total_sheets
+        keep[1] += total_weight
+        values: list[object] = [day] + ([line] if many else []) \
+            + [round(total_sheets), round(total_weight, 2)]
+        for shift in shifts:
+            picked = [r for r in same if r.shift == shift]
+            values += [round(sum(r.sheets for r in picked)),
+                       round(sum(r.weight for r in picked), 2)]
+        values += [round(sum(r.work for r in same)),
+                   round(sum(r.operating for r in same))]
+        for label, _ in STOP_COLUMNS_OUT:
+            values.append(round(sum(r.kinds.get(label, 0.0) for r in same)))
+        values += [round(sum(r.stop for r in same)),
+                   round(plate_graph.day_rate_pct(same), 1)]
+        for shift in shifts:
+            picked = [r for r in same if r.shift == shift]
+            # 生産性は直ごとに持っている数をそのまま(平均しません ──
+            # 1日1直なら1つ、同じ直が2行あるときだけ足して割ります)
+            values.append(round(sum(r.productivity for r in picked)
+                                / len(picked), 2) if picked else 0)
+        values += [round(keep[0]), round(keep[1], 2)]
+        body.append(values)
+
+    widths = {0: 14}
+    for index, name in enumerate(columns):
+        if len(name) >= 8:
+            widths[index] = min(20, len(name) + 3)
+    return xlsx_out.Sheet(name=SHEET_DAILY, columns=columns, rows=body,
+                          widths=widths, notes=notes)
+
+
+def _stop_pie_sheet(stops: list[dict[str, str]]) -> tuple[xlsx_out.Sheet, list]:
+    """**分類ごと**に並べた停止の表と、その行の範囲(円グラフが見ます)。
+
+    VBAのブックは分類ごとに列を分けていましたが、ここは1つの表に
+    `分類 / 内訳 / 回数 / (分)` で並べ、**円グラフが行の範囲を指します** ──
+    分類が増えても列を足さずに済みます。
+    """
+    totals: dict[tuple[str, str], list[float]] = {}
+    for row in stops:
+        if row.get("区分") and row.get("区分") != "直の合計":
+            continue                      # 1件ずつの行を足すと二重になります
+        name = (row.get("内訳") or row.get("記号") or "").strip()
+        if not name:
+            continue
+        key = (row.get("分類", "") or "(分類なし)", name)
+        found = totals.setdefault(key, [0.0, 0.0])
+        found[0] += plate_source.number(row.get("停止時間(分)"))
+        found[1] += plate_source.number(row.get("回数")) or 1
+
+    body: list[list[object]] = []
+    spans: list[tuple[str, int, int]] = []    # (分類, 先頭行, 最終行)
+    for kind in sorted({k for k, _ in totals}):
+        picked = sorted(((name, value) for (k, name), value in totals.items()
+                         if k == kind), key=lambda one: -one[1][0])
+        first = len(body) + 1                 # 表の中の番号(1から)
+        for name, value in picked:
+            body.append([kind, name, round(value[1]), round(value[0])])
+        spans.append((kind, first, len(body)))
+    sheet = xlsx_out.Sheet(name=SHEET_STOP_TOTAL,
+                           columns=["分類", "内訳", "回数", "(分)"],
+                           rows=body, widths={0: 18, 1: 24})
+    return sheet, spans
+
+
+def _charts(daily: xlsx_out.Sheet, stops: xlsx_out.Sheet,
+            spans: list) -> list[xlsx_out.Chart]:
+    r"""グラフを組む。**VBAのブックと同じ並び**です。
+
+        直重量(t)             棒。**直ごとに系列を分ける**
+        直枚数(枚)            棒。同上
+        停止・稼働時間(分)     棒。作業・稼働と停止の分類
+        生産性(t/h)           棒。直ごと(稼働率とは**別のグラフ**)
+        稼働率(％)            折れ線。%は桁が違うので混ぜません
+        累積枚数(枚)          折れ線
+        直枚数・累積枚数推移   棒 + 折れ線。**累積は右の目盛り**
+        停止の分類ごと         **円**(分類の数だけ)
+
+    稼働率と生産性を1枚に重ねていたのをやめました ── 90 と 3 を同じ
+    目盛りに乗せると、生産性が床に貼り付いて折れ線に見えません。
+    """
+    columns = daily.columns
+
+    def at(name: str) -> int:
         return columns.index(name) if name in columns else -1
 
-    date_at = column_of("日付")
+    date_at = at(COL_DATE)
     if date_at < 0:
         return []
+    shifts = [name[:-len("合計(枚)")] for name in columns
+              if name.endswith("合計(枚)") and name != COL_SHEETS]
     charts: list[xlsx_out.Chart] = []
 
-    def add(title: str, pairs: list[tuple[str, str]], y_title: str) -> None:
-        series = [xlsx_out.Series(title=label, column=column_of(name),
-                                  kind=("bar" if name == "合計枚数" else "line"))
-                  for label, name in pairs if column_of(name) >= 0]
+    def add(title: str, pairs: list[tuple[str, str, str]], y_title: str,
+            secondary: tuple[str, str] | None = None) -> None:
+        series = [xlsx_out.Series(title=label, column=at(name), kind=kind)
+                  for label, name, kind in pairs if at(name) >= 0]
+        if secondary and at(secondary[0]) >= 0:
+            series.append(xlsx_out.Series(title=secondary[1],
+                                          column=at(secondary[0]),
+                                          kind="line", axis="secondary"))
         if series:
-            charts.append(xlsx_out.Chart(title=title, source=sheet.name,
+            charts.append(xlsx_out.Chart(title=title, source=daily.name,
                                          labels=date_at, series=series,
                                          y_title=y_title))
 
-    add("日別・直別の重量", [("合計重量(t)", "合計重量(t)")], "t")
-    add("日別・直別の枚数", [("合計枚数", "合計枚数")], "枚")
-    add("稼働率と生産性", [("稼働率(%)", "稼働率(%)"),
-                           ("生産性(t/h)", "生産性(t/h)")], "%  /  t/h")
-    add("停止の分類ごと", [(label, column)
-                           for column, label in plate_graph.STOP_KIND_COLUMNS]
-        + [("停止合計(分)", "停止合計(分)")], "分")
+    add("直重量(t)", [(f"{s}(t)", f"{s}合計(t)", "bar") for s in shifts], "t")
+    add("直枚数(枚)", [(f"{s}(枚)", f"{s}合計(枚)", "bar") for s in shifts], "枚")
+    add("停止・稼働時間(分)",
+        [("作業時間合計", COL_WORK, "bar"), ("稼働時間合計", COL_OPERATING, "bar")]
+        + [(label, label, "bar") for _, label in STOP_COLUMNS_OUT], "分")
+    add("生産性(t/h)",
+        [(s, f"生産性{s}(t/h)", "bar") for s in shifts], "t/h")
+    add("稼働率(％)", [("稼働率", COL_RATE, "line")], "％")
+    add("累積枚数(枚)", [("日毎累計", COL_CUM_SHEETS, "line")], "枚")
+    # **桁が2つ違うので、累積だけ右の目盛り**(Excelの「第2軸に移動」と同じ)
+    add("直枚数・累積枚数推移",
+        [(f"{s}(枚)", f"{s}合計(枚)", "bar") for s in shifts], "枚",
+        secondary=(COL_CUM_SHEETS, "累積枚数(右目盛り)"))
+
+    for kind, first, last in spans:
+        if last < first:
+            continue
+        charts.append(xlsx_out.Chart(
+            title=f"「{kind}」(分)", source=stops.name, kind="pie",
+            labels=1,                          # 内訳の列
+            series=[xlsx_out.Series(title="(分)", column=3, kind="pie")],
+            row_from=stops.first_data_row + first - 1,
+            row_to=stops.first_data_row + last - 1))
     return charts
 
 
 def write_xlsx(collected: plate_source.Collected, path: Path,
                notes: list[str]) -> Path:
-    """Excel を1つ書く(**グラフ付き**)。"""
+    r"""Excel を1つ書く(**グラフ付き**)。
+
+    シートの並びは「絵 → 日ごとの数 → 停止 → 元のまま」です。
+    """
     path = Path(path)
-    agg = _sheet(SHEET_AGGREGATE, collected.columns, collected.rows, notes)
-    sheets = [agg]
+    daily = _daily_sheet(collected, notes)
+    stops, spans = _stop_pie_sheet(collected.stops)
+    sheets = [daily, stops]
     if collected.stops:
         sheets.append(_sheet(SHEET_STOP, collected.stop_columns,
                              collected.stops, []))
-        table = plate_graph.stop_table_tile(collected.stops)
-        sheets.append(xlsx_out.Sheet(
-            name=SHEET_STOP_TOTAL, columns=table.columns,
-            rows=[[_value(cell) for cell in row] for row in table.rows],
-            widths={0: 18, 1: 22}))
-    xlsx_out.write(path, sheets, _charts(agg, collected.columns))
-    log.info("板集計のExcelを書きました: %s (%d 行・グラフ %d 枚)",
-             path, len(collected.rows), len(_charts(agg, collected.columns)))
+    # **元のまま**も残します(CSVで出したものと同じ行)── 数が合わない
+    # ときに、どこで変わったのかを追えるように
+    sheets.append(_sheet(SHEET_SOURCE, collected.columns, collected.rows, []))
+    charts = _charts(daily, stops, spans)
+    xlsx_out.write(path, sheets, charts)
+    log.info("板集計のExcelを書きました: %s (%d 日・グラフ %d 枚)",
+             path, len(daily.rows), len(charts))
     return path
 
 

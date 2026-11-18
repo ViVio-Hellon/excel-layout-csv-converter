@@ -34,6 +34,24 @@ from pathlib import Path
 #: 切ったことをシートに書きます(黙って落としません)
 MAX_ROWS = 200_000
 
+#: 系列の色。**自分で指定します**(`a:srgbClr`)。
+#:
+#: Excel の既定の色は「テーマの色」から来ます。テーマ(`xl/theme/theme1.xml`)を
+#: 入れていないブックでは、色が決まらず**棒も扇も白く塗られて見えません**
+#: (LibreOffice で開いて、軸だけが出て中身が空なことで分かりました)。
+#: テーマ一式(8KB の XML)を抱えるより、使う色をここで指すほうが短く、
+#: **画面のグラフと同じ色**にもできます(`app/static/css/tokens.css`)。
+#:
+#: 直の4色は Excel のグラフと同じ 青・赤・緑・紫。その後ろは、停止の
+#: 分類や項目を並べて見分けるための色です。
+COLORS = ("1F6FEB", "C0392B", "1F8A4C", "7A4FD6", "B8860B", "0F8E9E",
+          "D2691E", "8A2F6B", "4B6B8A", "8A94A3")
+
+
+def color_at(index: int) -> str:
+    return COLORS[index % len(COLORS)]
+
+
 #: グラフ1枚の大きさ(EMU。1cm = 360000)と、縦に並べる間隔
 CHART_W = 16 * 360_000
 CHART_H = 9 * 360_000
@@ -101,23 +119,36 @@ class Sheet:
 
 @dataclass
 class Series:
-    """グラフの1本。`column` は表の何列目か(0から)。"""
+    """グラフの1本。`column` は表の何列目か(0から)。
+
+    `axis` に ``secondary`` を渡すと**右の目盛り**になります。桁が2つ
+    違うもの(直枚数と累積枚数)を1枚に重ねるためで、同じ目盛りに乗せると
+    片方が床に貼り付いて読めません。
+    """
 
     title: str
     column: int
     kind: str = "line"                 # bar / line
+    axis: str = "primary"              # primary / secondary
 
 
 @dataclass
 class Chart:
-    """グラフ1枚。**表のどの列を、どの軸で見るか**だけを持ちます。"""
+    """グラフ1枚。**表のどの列を、どの軸で見るか**だけを持ちます。
+
+    `kind` が ``pie`` のときは円グラフです(軸はありません)。扇の名前は
+    `labels` の列、大きさは `series` の1本目です。
+    """
 
     title: str
     source: str                        # どのシートの表を見るか(シート名)
-    labels: int                        # 横軸に使う列(0から)
+    labels: int                        # 横軸(円グラフでは扇の名前)に使う列
     series: list[Series] = field(default_factory=list)
-    kind: str = "line"                 # bar / line(系列ごとにも指定できます)
+    kind: str = "line"                 # bar / line / pie(系列ごとにも指定可)
     y_title: str = ""
+    #: 表の一部だけを使うとき(円グラフ。分類ごとに行が分かれています)
+    row_from: int = 0                  # 0 なら表の先頭から
+    row_to: int = 0                    # 0 なら表の最後まで
 
 
 # ----------------------------------------------------------------------
@@ -190,82 +221,167 @@ def _chart_sheet_xml(count: int) -> str:
             + "</worksheet>")
 
 
+def _rows_of(chart: Chart, sheet: Sheet) -> tuple[int, int]:
+    """そのグラフが見る行の範囲(表の一部だけを使う円グラフのため)。"""
+    first = chart.row_from or sheet.first_data_row
+    last = chart.row_to or sheet.last_data_row
+    return first, max(first, last)
+
+
 def _series_xml(index: int, chart: Chart, series: Series, sheet: Sheet) -> str:
     """系列1本。**値はセルの参照**(写した数ではありません)。"""
-    cats = sheet_ref(sheet.name, chart.labels, sheet.first_data_row,
-                     sheet.last_data_row)
-    vals = sheet_ref(sheet.name, series.column, sheet.first_data_row,
-                     sheet.last_data_row)
+    first, last = _rows_of(chart, sheet)
+    cats = sheet_ref(sheet.name, chart.labels, first, last)
+    vals = sheet_ref(sheet.name, series.column, first, last)
     name = sheet_ref(sheet.name, series.column, sheet.header_row,
                      sheet.header_row)
+    # 円グラフは系列が1本なので、名前はグラフの題と重なります。
+    # 扇ごとの数を出す(`showVal`)のは、割合だけ見せて終わりにしないため
+    labels = ('<c:dLbls><c:showLegendKey val="0"/><c:showVal val="1"/>'
+              '<c:showCatName val="0"/><c:showSerName val="0"/>'
+              '<c:showPercent val="0"/><c:showBubbleSize val="0"/></c:dLbls>'
+              if chart.kind == "pie" else "")
+    line = (series.kind or chart.kind) == "line"
+    color = color_at(index)
+    if chart.kind == "pie":
+        # 扇は1系列なので、**1つずつ色を指します**(`c:dPt`)。
+        # 指さないと全部同じ色になり、輪の意味がなくなります
+        paint = ""
+        spots = "".join(
+            f'<c:dPt><c:idx val="{i}"/><c:bubble3D val="0"/>'
+            f'<c:spPr><a:solidFill><a:srgbClr val="{color_at(i)}"/></a:solidFill>'
+            '<a:ln w="12700"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln>'
+            "</c:spPr></c:dPt>"
+            for i in range(max(0, last - first + 1)))
+    elif line:
+        paint = ('<c:spPr><a:ln w="22225"><a:solidFill>'
+                 f'<a:srgbClr val="{color}"/></a:solidFill></a:ln></c:spPr>')
+        spots = ""
+    else:
+        paint = ('<c:spPr><a:solidFill>'
+                 f'<a:srgbClr val="{color}"/></a:solidFill></c:spPr>')
+        spots = ""
+    marker = ('<c:marker><c:symbol val="circle"/><c:size val="5"/>'
+              f'<c:spPr><a:solidFill><a:srgbClr val="{color}"/></a:solidFill>'
+              "</c:spPr></c:marker>") if line and chart.kind != "pie" else ""
     return (f"<c:ser><c:idx val=\"{index}\"/><c:order val=\"{index}\"/>"
             f"<c:tx><c:strRef><c:f>{escape(name)}</c:f></c:strRef></c:tx>"
-            + ("<c:marker><c:symbol val=\"circle\"/><c:size val=\"5\"/></c:marker>"
-               if series.kind == "line" else "")
+            + paint + marker + spots
+            + labels
             + f"<c:cat><c:strRef><c:f>{escape(cats)}</c:f></c:strRef></c:cat>"
             f"<c:val><c:numRef><c:f>{escape(vals)}</c:f></c:numRef></c:val>"
-            + ("<c:smooth val=\"0\"/>" if series.kind == "line" else "")
+            + ("<c:smooth val=\"0\"/>" if line and chart.kind != "pie" else "")
             + "</c:ser>")
+
+
+def _title_xml(text: str, *, sideways: bool = False) -> str:
+    """グラフの題・軸の名前。"""
+    turn = ' rot="-5400000" vert="horz"' if sideways else ""
+    return ('<c:title><c:tx><c:rich>'
+            '<a:bodyPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+            f'{turn}/>'
+            '<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+            f'<a:r><a:t>{escape(text)}</a:t></a:r></a:p>'
+            '</c:rich></c:tx><c:overlay val="0"/></c:title>')
+
+
+#: 軸の番号。**左右で別の組**を使います(右は「第2軸」)
+AX_CAT, AX_VAL = "111111111", "222222222"
+AX_CAT2, AX_VAL2 = "333333333", "444444444"
+
+
+def _plots_xml(chart: Chart, sheet: Sheet, series: list[Series],
+               cat_id: str, val_id: str, start: int) -> str:
+    """棒と折れ線を、指された軸の組の上に並べる。"""
+    bars = [s for s in series if (s.kind or chart.kind) == "bar"]
+    liner = [s for s in series if (s.kind or chart.kind) == "line"]
+    out = ""
+    if bars:
+        body = "".join(_series_xml(start + i, chart, one, sheet)
+                       for i, one in enumerate(bars))
+        start += len(bars)
+        out += ('<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>'
+                '<c:varyColors val="0"/>' + body
+                + '<c:gapWidth val="60"/>'
+                f'<c:axId val="{cat_id}"/><c:axId val="{val_id}"/></c:barChart>')
+    if liner:
+        body = "".join(_series_xml(start + i, chart, one, sheet)
+                       for i, one in enumerate(liner))
+        out += ('<c:lineChart><c:grouping val="standard"/>'
+                '<c:varyColors val="0"/>' + body
+                + '<c:marker val="1"/>'
+                f'<c:axId val="{cat_id}"/><c:axId val="{val_id}"/></c:lineChart>')
+    return out
+
+
+def _axes_xml(y_title: str, *, secondary: bool) -> str:
+    """軸。**要素の並びは決まっています** ── 入れ替えると Excel が
+    「読み取れない内容」と言って開きません(目盛り線 → 軸の名前の順)。
+
+    第2軸があるときは、右の目盛り(`crosses=max`)と、**消した横軸**を
+    もう1組足します ── Excel の「第2軸に移動」と同じ形です。
+    """
+    axes = (f'<c:catAx><c:axId val="{AX_CAT}"/><c:scaling>'
+            '<c:orientation val="minMax"/></c:scaling><c:delete val="0"/>'
+            f'<c:axPos val="b"/><c:crossAx val="{AX_VAL}"/></c:catAx>'
+            f'<c:valAx><c:axId val="{AX_VAL}"/><c:scaling>'
+            '<c:orientation val="minMax"/></c:scaling><c:delete val="0"/>'
+            '<c:axPos val="l"/><c:majorGridlines/>'
+            + (_title_xml(y_title, sideways=True) if y_title else "")
+            + f'<c:crossAx val="{AX_CAT}"/></c:valAx>')
+    if not secondary:
+        return axes
+    return axes + (
+        f'<c:valAx><c:axId val="{AX_VAL2}"/><c:scaling>'
+        '<c:orientation val="minMax"/></c:scaling><c:delete val="0"/>'
+        f'<c:axPos val="r"/><c:crossAx val="{AX_CAT2}"/>'
+        '<c:crosses val="max"/></c:valAx>'
+        f'<c:catAx><c:axId val="{AX_CAT2}"/><c:scaling>'
+        '<c:orientation val="minMax"/></c:scaling><c:delete val="1"/>'
+        f'<c:axPos val="b"/><c:crossAx val="{AX_VAL2}"/></c:catAx>')
 
 
 def _chart_xml(chart: Chart, sheet: Sheet) -> str:
     r"""グラフ1枚ぶんの XML。
 
-    **棒と折れ線を1枚に混ぜられます** ── 系列ごとに `kind` を見て、
-    `barChart` と `lineChart` を同じ軸の上に並べます(枚数の棒と
-    累積の折れ線のような組み合わせ)。軸は共通です ── 左右に分けると
-    Excel 側で軸を直すのが難しくなるので、**分けるならシートを分ける**
-    ほうを選びました。
-    """
-    bars = [s for s in chart.series if (s.kind or chart.kind) == "bar"]
-    liner = [s for s in chart.series if (s.kind or chart.kind) == "line"]
-    plots = ""
-    index = 0
-    if bars:
-        body = "".join(_series_xml(index + i, chart, s, sheet)
-                       for i, s in enumerate(bars))
-        index += len(bars)
-        plots += ('<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>'
-                  '<c:varyColors val="0"/>' + body
-                  + '<c:gapWidth val="60"/>'
-                  '<c:axId val="111111111"/><c:axId val="222222222"/></c:barChart>')
-    if liner:
-        body = "".join(_series_xml(index + i, chart, s, sheet)
-                       for i, s in enumerate(liner))
-        plots += ('<c:lineChart><c:grouping val="standard"/>'
-                  '<c:varyColors val="0"/>' + body
-                  + '<c:marker val="1"/>'
-                  '<c:axId val="111111111"/><c:axId val="222222222"/></c:lineChart>')
+    **3通りあります。**
 
-    title = (f'<c:title><c:tx><c:rich>'
-             f'<a:bodyPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>'
-             f'<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
-             f'<a:r><a:t>{escape(chart.title)}</a:t></a:r></a:p>'
-             f'</c:rich></c:tx><c:overlay val="0"/></c:title>'
-             '<c:autoTitleDeleted val="0"/>')
-    y_title = ""
-    if chart.y_title:
-        y_title = ('<c:title><c:tx><c:rich>'
-                   '<a:bodyPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
-                   ' rot="-5400000" vert="horz"/>'
-                   '<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
-                   f'<a:r><a:t>{escape(chart.y_title)}</a:t></a:r></a:p>'
-                   '</c:rich></c:tx><c:overlay val="0"/></c:title>')
-    axes = ('<c:catAx><c:axId val="111111111"/><c:scaling>'
-            '<c:orientation val="minMax"/></c:scaling><c:delete val="0"/>'
-            '<c:axPos val="b"/><c:crossAx val="222222222"/></c:catAx>'
-            '<c:valAx><c:axId val="222222222"/><c:scaling>'
-            '<c:orientation val="minMax"/></c:scaling><c:delete val="0"/>'
-            # **並びは決まっています**(目盛り線 → 軸の名前)。入れ替えると
-            # Excel が「読み取れない内容」と言って開きません
-            '<c:axPos val="l"/><c:majorGridlines/>' + y_title
-            + '<c:crossAx val="111111111"/></c:valAx>')
+        棒・折れ線   日付を横軸に、系列を縦に並べる(直別は系列を分ける)
+        2軸          桁が2つ違うものを重ねる(直枚数と累積枚数)
+        円           停止の分類ごと。**割合が形になるほうが早い**
+
+    もとにしたのは、VBA が出していた月別集計のブックです
+    (`docs/板集計.md` の「Excelの作り」)。
+    """
+    if chart.kind == "pie":
+        body = _series_xml(0, chart, chart.series[0], sheet)
+        plots = ('<c:pieChart><c:varyColors val="1"/>' + body
+                 + '<c:firstSliceAng val="0"/></c:pieChart>')
+        return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<c:chartSpace'
+                ' xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
+                ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+                ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                "<c:chart>" + _title_xml(chart.title)
+                + '<c:autoTitleDeleted val="0"/><c:plotArea><c:layout/>'
+                + plots + "</c:plotArea>"
+                '<c:legend><c:legendPos val="r"/><c:overlay val="0"/></c:legend>'
+                '<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/>'
+                "</c:chart></c:chartSpace>")
+
+    left = [s for s in chart.series if s.axis != "secondary"]
+    right = [s for s in chart.series if s.axis == "secondary"]
+    plots = _plots_xml(chart, sheet, left, AX_CAT, AX_VAL, 0)
+    if right:
+        plots += _plots_xml(chart, sheet, right, AX_CAT2, AX_VAL2, len(left))
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<c:chartSpace'
             ' xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
             ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
             ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            "<c:chart>" + title + "<c:plotArea><c:layout/>" + plots + axes
+            "<c:chart>" + _title_xml(chart.title)
+            + '<c:autoTitleDeleted val="0"/><c:plotArea><c:layout/>' + plots
+            + _axes_xml(chart.y_title, secondary=bool(right))
             + "</c:plotArea>"
             '<c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend>'
             '<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/>'
