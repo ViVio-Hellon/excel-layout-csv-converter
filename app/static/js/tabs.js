@@ -17,7 +17,18 @@ const KEY = "xlcsv-tab";
 /** 出せるタブ。**ここに無い名前は受けません**(覚えていた字が古い場合) */
 const NAMES = ["convert", "tally", "plate", "settings"];
 
-let current = "convert";
+/**
+ * はじめて開いたときのタブ。
+ *
+ * **いちばんよく開くもの**にします ── 変換は溜まったブックを入れる
+ * ときだけ、設定は据え付けのときだけです。毎日見るのは板集計なので、
+ * 開いた瞬間にそこが出ているほうが手数が1つ減ります。
+ *
+ * 2度目からは**前に開いていたタブ**です(端末に覚えます)。
+ */
+const FIRST = "plate";
+
+let current = FIRST;
 
 export function active() {
   return current;
@@ -47,5 +58,5 @@ export function wire() {
   });
   let saved = "";
   try { saved = localStorage.getItem(KEY) || ""; } catch (e) { saved = ""; }
-  show(NAMES.includes(saved) ? saved : "convert");
+  show(NAMES.includes(saved) ? saved : FIRST);
 }

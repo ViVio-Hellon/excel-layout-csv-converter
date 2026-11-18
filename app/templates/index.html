@@ -25,18 +25,18 @@
 
   <!-- タブ ------------------------------------------------------ -->
   <nav class="tabs" role="tablist" aria-label="やること">
-    <button class="tab on" id="tab-convert" data-tab="convert"
-            role="tab" aria-selected="true">変換</button>
+    <button class="tab" id="tab-convert" data-tab="convert"
+            role="tab" aria-selected="false">変換</button>
     <button class="tab" id="tab-tally" data-tab="tally"
             role="tab" aria-selected="false">機側データ集計</button>
-    <button class="tab" id="tab-plate" data-tab="plate"
-            role="tab" aria-selected="false">板集計</button>
+    <button class="tab on" id="tab-plate" data-tab="plate"
+            role="tab" aria-selected="true">板集計</button>
     <button class="tab" id="tab-settings" data-tab="settings"
             role="tab" aria-selected="false">設定</button>
   </nav>
 
   <!-- 変換タブ --------------------------------------------------- -->
-  <div class="panel" id="panel-convert" role="tabpanel">
+  <div class="panel" id="panel-convert" role="tabpanel" hidden>
 
     <section class="card">
       <div class="card-head">
@@ -172,7 +172,7 @@
   </div>
 
   <!-- 板集計タブ -------------------------------------------------- -->
-  <div class="panel" id="panel-plate" role="tabpanel" hidden>
+  <div class="panel" id="panel-plate" role="tabpanel">
 
     <section class="card">
       <div class="card-head">

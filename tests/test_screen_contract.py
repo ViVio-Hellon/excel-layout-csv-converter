@@ -67,6 +67,18 @@ class TabTests(unittest.TestCase):
         names = (JS_DIR / "tabs.js").read_text(encoding="utf-8")
         self.assertIn('["convert", "tally", "plate", "settings"]', names)
 
+    def test_はじめに出るタブは板集計(self) -> None:
+        """いちばんよく開くものを最初に出します(2度目からは前のタブ)。"""
+        js = (JS_DIR / "tabs.js").read_text(encoding="utf-8")
+        self.assertIn('const FIRST = "plate";', js)
+        # JSが動く前の見た目も合わせます(ちらつきを防ぐため)
+        self.assertIn('<button class="tab on" id="tab-plate"', HTML)
+        self.assertIn('id="panel-plate" role="tabpanel">', HTML)
+        self.assertIn('id="panel-convert" role="tabpanel" hidden>', HTML)
+        base = (ROOT / "app" / "templates" / "base.html").read_text(
+            encoding="utf-8")
+        self.assertIn('data-tab="plate"', base)
+
     def test_設定部は設定タブの中にある(self) -> None:
         """前は上に固定していました。**開いて最初に出るのは「やること」**。"""
         at_settings_panel = HTML.index('id="panel-settings"')

@@ -85,6 +85,7 @@ class VersionAgreementTests(unittest.TestCase):
         config/app.json          画面の帯と診断に出る版
         src-tauri/tauri.conf.json 窓(デスクトップ版)の版
         src-tauri/Cargo.toml     exe の版(Windowsのプロパティに出る)
+        src-tauri/Cargo.lock     ↑を書き写したもの(**忘れると CI が止まります**)
 
     どれか1つを上げ忘れると、「画面は 1.12.0 なのに exe は 1.11.3」に
     なり、どちらが配られているのか分からなくなります。
@@ -102,8 +103,24 @@ class VersionAgreementTests(unittest.TestCase):
                 return line.split("=", 1)[1].strip().strip('"')
         return ""
 
-    def test_3か所の版がそろっている(self) -> None:
+    def _lock_version(self) -> str:
+        """`Cargo.lock` に書かれた、このツール自身の版。
+
+        `cargo` は `Cargo.toml` の版を lock にも写します。上げ忘れると
+        **`cargo test --locked` が「lock を更新できません」で止まります**
+        (CI が1度これで赤くなりました)。
+        """
+        text = (self.ROOT / "src-tauri" / "Cargo.lock").read_text(
+            encoding="utf-8")
+        at = text.index('name = "excel-csv-converter-desktop"')
+        for line in text[at:].splitlines()[1:4]:
+            if line.startswith("version"):
+                return line.split("=", 1)[1].strip().strip('"')
+        return ""
+
+    def test_版がそろっている(self) -> None:
         app = self._json_version("config/app.json")
         self.assertRegex(app, r"^\d+\.\d+\.\d+$")
         self.assertEqual(self._json_version("src-tauri/tauri.conf.json"), app)
         self.assertEqual(self._cargo_version(), app)
+        self.assertEqual(self._lock_version(), app)
