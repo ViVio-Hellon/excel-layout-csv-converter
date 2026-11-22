@@ -30,10 +30,14 @@ async function boot() {
     $(id).textContent = "0 / " + window.APP.max_files + " 本";
   });
 
-  tabs.wire();
   wireShell();
   await Promise.all([settings.wire(), input.wire(), job.wire(),
                      plate.wire()]);
+  // **タブは最後に配線します。** `tabs.wire()` は「いまのタブ」を知らせる
+  // ので、先に呼ぶと**誰も聞いていないうちに知らせが飛びます** ── 板集計を
+  // はじめに出すようにしたとき、タブを一度も押さないとラインの一覧も期間も
+  // 空のままになりました(`views/plate.js` がその知らせで読み込むため)
+  tabs.wire();
   startHeartbeat();
 }
 

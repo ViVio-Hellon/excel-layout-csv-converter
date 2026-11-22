@@ -64,6 +64,27 @@ function paintLines(data) {
   }
 }
 
+/** ラインの選び(ロットを探す)。**「全ライン」も選べます。** */
+function paintLotLines(data) {
+  const box = document.getElementById("lot-line");
+  if (!box) { return; }
+  const before = box.value;
+  box.replaceChildren();
+  const all = document.createElement("option");
+  all.value = "*";
+  all.textContent = "全ライン";
+  box.append(all);
+  (data.lines || []).forEach((one) => {
+    if (!one.has_aggregate) { return; }
+    const item = document.createElement("option");
+    item.value = one.name;
+    item.textContent = one.name;
+    box.append(item);
+  });
+  box.value = before || "*";
+  if (!box.value) { box.value = "*"; }
+}
+
 export function load() {
   return api("/api/plate").then((result) => {
     const data = result.data || {};
@@ -79,6 +100,12 @@ export function load() {
       $("plate-start").value = data.span.start;
       $("plate-end").value = data.span.end;
     }
+    // ロットを探すの期間も、はじめは同じところから(広げたければ欄で変えます)
+    if (data.span && !$("lot-start").value) {
+      $("lot-start").value = data.span.start;
+      $("lot-end").value = data.span.end;
+    }
+    paintLotLines(data);
     $("plate-max").textContent = data.max_days;
   });
 }
@@ -175,16 +202,92 @@ function save(kind) {
     });
 }
 
+/* ==================================================================
+   ロットを探す
+
+   **何を出すかはサーバが決めます**(`converter/plate_lot.py`)── 列も
+   並びも上限も断りの文言もあちらが持っていて、ここは表に入れるだけです。
+   ================================================================== */
+function lotAsk() {
+  return {
+    start: $("lot-start").value,
+    end: $("lot-end").value,
+    lot: $("lot-no").value,
+    line: $("lot-line").value || "*",
+  };
+}
+
+function paintLots(data) {
+  const head = $("lot-head");
+  const body = $("lot-body");
+  head.replaceChildren();
+  body.replaceChildren();
+  (data.columns || []).forEach((name, i) => {
+    const cell = document.createElement("th");
+    cell.textContent = name;
+    if ((data.numeric || [])[i]) { cell.className = "num"; }
+    head.append(cell);
+  });
+  (data.rows || []).forEach((row) => {
+    const line = document.createElement("tr");
+    row.forEach((value, i) => {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      if ((data.numeric || [])[i]) { cell.className = "num"; }
+      line.append(cell);
+    });
+    body.append(line);
+  });
+  $("lot-summary").textContent = data.summary || "";
+  const warn = $("lot-warn");
+  const words = (data.warnings || []).join("\n");
+  warn.hidden = !words;
+  warn.textContent = words;
+  if (data.limit) { $("lot-limit").textContent = data.limit; }
+}
+
+function findLots(then) {
+  if (!$("lot-no").value.trim()) {
+    $("lot-no").focus();
+    return toast.bad("lot-msg", "ロット№を入れてください(頭の数桁だけでも)");
+  }
+  const path = then === "csv" ? "/api/plate/lots/export" : "/api/plate/lots";
+  $("lot-run").disabled = true;
+  api(path, { json: lotAsk() }).then((result) => {
+    $("lot-run").disabled = false;
+    if (!result.ok) { return toast.bad("lot-msg", reason(result)); }
+    paintLots(result.data);
+    if (then !== "csv") {
+      return toast.ok("lot-msg", result.data.total
+        ? `${result.data.total} 行あたりました`
+        : "当たった行はありません");
+    }
+    if (!result.data.ok) { return toast.say("lot-msg", result.data.message); }
+    toast.ok("lot-msg", result.data.message
+      + "(出力先フォルダ。「出力先を開く」で見られます)", 8000);
+  }).catch(() => {
+    $("lot-run").disabled = false;
+    toast.bad("lot-msg", "探せませんでした");
+  });
+}
+
 export function wire() {
   $("plate-run").addEventListener("click", run);
   $("plate-csv").addEventListener("click", () => save("csv"));
   $("plate-xlsx").addEventListener("click", () => save("xlsx"));
   $("plate-reload").addEventListener("click", () => load());
+  $("lot-run").addEventListener("click", () => findLots("screen"));
+  $("lot-csv").addEventListener("click", () => findLots("csv"));
+  // ロット№の欄で Enter ＝「探す」(打ってすぐ押せるように)
+  $("lot-no").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); findLots("screen"); }
+  });
   $("plate-all").addEventListener("click", () => {
     document.querySelectorAll("#plate-lines input:not([disabled])")
       .forEach((box) => { box.checked = true; });
   });
-  // タブに入ったときに読み直します(設定を変えた直後でも追えるように)
+  // タブに入ったときに読み直します(設定を変えた直後でも追えるように)。
+  // **最初の知らせもここで受けます** ── `app.js` はタブを最後に配線します
   window.addEventListener("xlcsv:tab", (event) => {
     if (event.detail === "plate") { load(); }
   });

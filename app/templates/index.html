@@ -224,6 +224,55 @@
 
     <section class="card">
       <div class="card-head">
+        <h2>ロットを探す</h2>
+        <p>期間と<b>ロット№(頭の数桁だけでも)</b>で、集計明細CSVから
+           当たった行を出します。<b>前方一致</b>で、全角で打っても当たります
+           (<code>ｎ７１</code> → <code>N71</code>)。
+           <b>読むだけ</b>で、何も書き換えません。</p>
+      </div>
+
+      <div class="fields">
+        <label class="field">
+          <span class="label">開始日<em>必須</em></span>
+          <input type="date" id="lot-start">
+        </label>
+        <label class="field">
+          <span class="label">終了日<em>必須</em></span>
+          <input type="date" id="lot-end">
+        </label>
+        <label class="field">
+          <span class="label">ロット№<em>必須</em></span>
+          <input type="text" id="lot-no" spellcheck="false" maxlength="7"
+                 placeholder="例: N71(頭の数桁だけでも)">
+        </label>
+        <label class="field">
+          <span class="label">ライン</span>
+          <select id="lot-line"></select>
+        </label>
+      </div>
+
+      <div class="row">
+        <button class="primary big" id="lot-run">探す</button>
+        <button id="lot-csv">CSVに出す</button>
+        <span class="msg" id="lot-msg"></span>
+      </div>
+      <p class="hint">出す先は設定タブの「出力先フォルダ」です
+        (<b>ブラウザへダウンロードはしません</b>)。
+        画面は <b id="lot-limit">200</b> 行までで、<b>CSVも画面と同じ行</b>です
+        ── 違うものが出ると、どちらが本当か分からなくなります。</p>
+
+      <div class="notice warn" id="lot-warn" hidden></div>
+      <p class="hint" id="lot-summary"></p>
+      <div class="table-wrap">
+        <table id="lot-table">
+          <thead><tr id="lot-head"></tr></thead>
+          <tbody id="lot-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
         <h2>まとめたもの</h2>
         <p><span id="plate-note"></span>　<span class="hint" id="plate-summary"></span></p>
       </div>

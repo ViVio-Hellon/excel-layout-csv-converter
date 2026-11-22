@@ -202,3 +202,7 @@ tr.suspect .detail, tr.ng .detail { color: inherit; }
 .dlg__swatch--line { height: 3px; border-radius: 2px; }
 .dlg__text { color: var(--dim); }
 .dlg b { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+/* ロットを探すの表。**折り返しません** ── 「2直」が2行になると、
+ * 行が縦に伸びて目で追えなくなります(横は器がずれます) */
+#lot-table td, #lot-table th { white-space: nowrap; }

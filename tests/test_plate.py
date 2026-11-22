@@ -28,8 +28,42 @@ DAY1 = datetime.date(2026, 11, 1)
 DAY30 = datetime.date(2026, 11, 30)
 
 
+#: 集計明細CSVの列(`nippou.reporting.csv_export.DETAIL_FIELDNAMES` の形)。
+#: ロットを探すが読むのはこちらです ── 1行=1ロット
+DETAIL_COLUMNS = (
+    "日付", "ライン", "直", "ページ", "行", "ロット№", "材・調質",
+    "製品寸法 厚×幅×丈", "検入枚数",
+    "梱包作業時間 開始 時", "梱包作業時間 開始 分",
+    "梱包作業時間 終了 時", "梱包作業時間 終了 分",
+    "実績合計 枚数", "実績合計 重量", "作業時間(分)",
+    "作業者", "用途名", "納入先",
+)
+
+
+def write_detail(folder: Path, line: str, stamp: str, lots) -> Path:
+    """その日の集計明細CSVを置く。`lots` は `(直, ページ, 行, ロット№)`。"""
+    path = folder / f"集計明細_{stamp}_{line}.csv"
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(DETAIL_COLUMNS))
+        writer.writeheader()
+        for shift, page, row_no, lot in lots:
+            writer.writerow({
+                **{name: "" for name in DETAIL_COLUMNS},
+                "日付": stamp, "ライン": line, "直": shift, "ページ": page,
+                "行": row_no, "ロット№": lot, "材・調質": "SS400",
+                "製品寸法 厚×幅×丈": "3.2×1219×2438", "検入枚数": 40,
+                "梱包作業時間 開始 時": "08", "梱包作業時間 開始 分": "15",
+                "梱包作業時間 終了 時": "09", "梱包作業時間 終了 分": "40",
+                "実績合計 枚数": 40, "実績合計 重量": "2.4",
+                "作業時間(分)": 85, "作業者": "山田", "用途名": "外販",
+                "納入先": "〇〇鋼材",
+            })
+    return path
+
+
 def write_day(base: Path, line: str, stamp: str, *, shifts=("1直", "2直", "3直"),
-              extra: dict | None = None, columns=None, stops=True) -> Path:
+              extra: dict | None = None, columns=None, stops=True,
+              lots=None) -> Path:
     """日報管理ツールが書く形で、1日ぶん置く。"""
     date_part = stamp.split("-")
     folder = (base / line / "集計" / f"{date_part[0]}.{date_part[1]}"
@@ -68,6 +102,8 @@ def write_day(base: Path, line: str, stamp: str, *, shifts=("1直", "2直", "3�
                 one.update({"区分": "1件ずつ", "ページ": 1, "行": 2,
                             "停止時間(分)": minutes})
                 writer.writerow(one)
+    if lots:
+        write_detail(folder, line, stamp, lots)
     return folder
 
 
@@ -647,3 +683,211 @@ class ExcelShapeTests(WebCase):
         charts = self.charts(self.book(got))
         self.assertFalse([t for t, b in charts.items() if "pieChart" in b])
         self.assertIn("直重量(t)", charts)
+
+
+class LotSearchTests(WebCase):
+    r"""ロットを探す ── 期間とロット№で、集計明細CSVから当たった行を出す
+
+    日報管理ツールの「ロットを探す」の移植です。肝は3つ。
+
+        前方一致で、**全角で打っても当たる**(現場の IME はよく全角です)
+        空欄は断る(期間の全部を出しても、上限に当たるだけ)
+        **読むだけ**(探しても何も書きません)
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.tmp / "板"
+        self.base.mkdir()
+        write_day(self.base, "L-1", "2026-11-01",
+                  lots=[("1直", 1, 1, "N7131T0"), ("1直", 1, 2, "N7132T0"),
+                        ("2直", 2, 1, "K9001A0")])
+        write_day(self.base, "L-1", "2026-11-02",
+                  lots=[("3直", 1, 1, "N7140T0")])
+        write_day(self.base, "L-2", "2026-11-02",
+                  lots=[("1直", 1, 1, "N7199Z9")])
+        user_settings.save({"plate_dir": str(self.base),
+                            "output_dir": str(self.tmp / "出力")})
+
+    def find(self, lot: str, *, line="", start=DAY1, end=DAY30):
+        from converter import plate_lot
+        return plate_lot.search(self.base, [line] if line else [], start, end, lot)
+
+    # -- 当たり方 ----------------------------------------------------
+    def test_頭の数桁で当たる(self) -> None:
+        got = self.find("N713")
+        self.assertEqual(got.total, 2)                 # N7131T0 / N7132T0
+        lots = [row[got.columns.index("ロット№")] for row in got.rows]
+        self.assertEqual(lots, ["N7131T0", "N7132T0"])
+        # 桁を減らすと広がります(N7140T0 と、L-2 の N7199Z9 も)
+        self.assertEqual(self.find("N71").total, 4)
+
+    def test_全角でも小文字でも空白が入っても当たる(self) -> None:
+        for text in ("Ｎ７１３１Ｔ０", "n7131t0", " N7131T0 ", "n-7131-t0"):
+            self.assertEqual(self.find(text).total, 1, text)
+
+    def test_丸ごと打っても当たる(self) -> None:
+        self.assertEqual(self.find("K9001A0").total, 1)
+
+    def test_ラインを選べる(self) -> None:
+        self.assertEqual(self.find("N71").total, 4)            # 全ライン
+        self.assertEqual(self.find("N71", line="L-1").total, 3)
+        self.assertEqual(self.find("N7199").total, 1)          # L-2 の行
+        self.assertEqual(self.find("N7199", line="L-1").total, 0)
+        self.assertEqual(self.find("N7199", line="L-2").total, 1)
+
+    def test_期間で絞る(self) -> None:
+        self.assertEqual(self.find("N7140").total, 1)
+        self.assertEqual(self.find("N7140", start=DAY1,
+                                   end=datetime.date(2026, 11, 1)).total, 0)
+
+    def test_作業日_ライン_直_ページ_行の順に並ぶ(self) -> None:
+        got = self.find("N")
+        keys = [(row[0], row[1], row[2], row[3], row[4]) for row in got.rows]
+        self.assertEqual(keys, sorted(keys))
+        self.assertEqual(keys[0][0], "2026-11-01")
+
+    # -- 断るもの ----------------------------------------------------
+    def test_空欄は断る(self) -> None:
+        from converter import plate_lot
+        with self.assertRaises(plate_lot.BadRequest) as caught:
+            self.find("")
+        self.assertIn("ロット№を入れてください", str(caught.exception))
+        self.assertEqual(caught.exception.field_name, "lot")
+
+    def test_当たらなければ理由を出す(self) -> None:
+        got = self.find("ZZZZ")
+        self.assertEqual(got.total, 0)
+        self.assertTrue(got.warnings)
+        self.assertIn("期間を広げる", got.warnings[0])
+
+    def test_多すぎたら先の何行かだけ出す(self) -> None:
+        from converter import plate_lot
+        original = plate_lot.LIMIT
+        plate_lot.LIMIT = 2
+        self.addCleanup(setattr, plate_lot, "LIMIT", original)
+        got = self.find("N")
+        self.assertEqual(got.total, 4)
+        self.assertEqual(got.shown, 2)
+        self.assertIn("多すぎる", got.warnings[0])
+
+    def test_明細が無ければそう言う(self) -> None:
+        for path in self.base.rglob("集計明細_*.csv"):
+            path.unlink()
+        got = self.find("N71")
+        self.assertEqual(got.total, 0)
+        self.assertTrue(any("集計明細CSV" in one for one in got.warnings))
+
+    def test_見出しが違う明細は理由を残す(self) -> None:
+        path = next(self.base.rglob("集計明細_*.csv"))
+        path.write_text("よその,見出し\n1,2\n", encoding="utf-8-sig")
+        got = self.find("N71")
+        self.assertTrue(any("ロット№" in one["reason"] for one in got.skipped))
+
+    # -- 出す --------------------------------------------------------
+    def test_表の列は紙の欄(self) -> None:
+        got = self.find("N7131")
+        for name in ("作業日", "ライン", "直", "ページ", "行", "ロット№",
+                     "材・調質", "厚×幅×丈", "検入枚数", "開始", "終了",
+                     "実績枚数", "実績重量", "作業者", "用途名", "納入先"):
+            self.assertIn(name, got.columns)
+        row = got.rows[0]
+        self.assertEqual(row[got.columns.index("開始")], "08:15")
+        self.assertEqual(row[got.columns.index("終了")], "09:40")
+        self.assertEqual(row[got.columns.index("作業者")], "山田")
+
+    def test_CSVは画面と同じ行で条件も書く(self) -> None:
+        from converter import plate_lot
+        got = self.find("N71")
+        written = plate_lot.write_csv(got, self.tmp / "出力",
+                                      start=DAY1, end=DAY30)
+        path = Path(written["path"])
+        self.assertTrue(path.name.startswith("ロット検索_N71_"))
+        raw = path.read_bytes()
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))      # BOM付きUTF-8
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        self.assertIn("ロットを探す", lines[0])
+        self.assertIn("2026-11-01", lines[0])
+        self.assertEqual(lines[2].split(",")[0], "作業日")
+        self.assertEqual(len(lines), 3 + got.total)
+
+    def test_探しても何も書かない(self) -> None:
+        before = sorted(p.name for p in self.base.rglob("*"))
+        self.find("N71")
+        self.assertEqual(sorted(p.name for p in self.base.rglob("*")), before)
+
+
+class LotRouteTests(WebCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.tmp / "板"
+        self.base.mkdir()
+        write_day(self.base, "L-1", "2026-11-01",
+                  lots=[("1直", 1, 1, "N7131T0"), ("2直", 2, 1, "K9001A0")])
+        user_settings.save({"plate_dir": str(self.base),
+                            "output_dir": str(self.tmp / "出力")})
+
+    def ask(self, body: dict, path="/api/plate/lots"):
+        full = {"start": "2026-11-01", "end": "2026-11-30", "line": "*"}
+        full.update(body)
+        return self.request("POST", path, full, screen_id=self.claim())
+
+    def test_探せる(self) -> None:
+        status, data = self.ask({"lot": "n71"})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["lot"], "N71")
+        self.assertIn("作業日", data["columns"])
+
+    def test_ロット番号が空なら断る(self) -> None:
+        status, data = self.ask({"lot": "  "})
+        self.assertEqual(status, 400)
+        self.assertIn("ロット№を入れてください", data["reason"])
+
+    def test_日付が読めなければ断る(self) -> None:
+        status, data = self.ask({"lot": "N71", "start": "11月"})
+        self.assertEqual(status, 400)
+        self.assertIn("開始日が読めません", data["reason"])
+        status, data = self.ask({"lot": "N71", "end": ""})
+        self.assertEqual(status, 400)
+        self.assertIn("終了日が読めません", data["reason"])
+
+    def test_一覧に無いラインは断る(self) -> None:
+        for name in ("よそ", r"..\..\Windows"):
+            status, data = self.ask({"lot": "N71", "line": name})
+            self.assertEqual(status, 400)
+            self.assertIn("そのラインはありません", data["reason"])
+
+    def test_全ラインは星印で受ける(self) -> None:
+        _status, data = self.ask({"lot": "N", "line": "*"})
+        self.assertEqual(data["total"], 1)         # N7131T0(K9001A0 は別)
+        _status, data = self.ask({"lot": "K", "line": "*"})
+        self.assertEqual(data["total"], 1)
+
+    def test_CSVに出す(self) -> None:
+        status, data = self.ask({"lot": "N71"}, "/api/plate/lots/export")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        path = Path(data["written"]["path"])
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.parent, self.tmp / "出力")
+
+    def test_当たらなければ書かない(self) -> None:
+        _status, data = self.ask({"lot": "ZZZ"}, "/api/plate/lots/export")
+        self.assertFalse(data["ok"])
+        self.assertIn("当たった行がない", data["message"])
+        self.assertFalse(list((self.tmp / "出力").glob("*.csv"))
+                         if (self.tmp / "出力").is_dir() else [])
+
+    def test_出力先が無ければ断る(self) -> None:
+        user_settings.save({"output_dir": ""})
+        status, data = self.ask({"lot": "N71"}, "/api/plate/lots/export")
+        self.assertEqual(status, 400)
+        self.assertIn("出力先", data["reason"])
+
+    def test_参照パスが無ければ断る(self) -> None:
+        user_settings.save({"plate_dir": ""})
+        status, data = self.ask({"lot": "N71"})
+        self.assertEqual(status, 400)
+        self.assertIn("板データ参照パス", data["detail"])

@@ -95,6 +95,41 @@ class TabTests(unittest.TestCase):
         self.assertIn('id="running-area"', HTML)
 
 
+class TabOrderTests(unittest.TestCase):
+    r"""タブの配線は**いちばん最後**
+
+    `tabs.wire()` は「いまのタブ」を知らせます。先に呼ぶと**誰も聞いて
+    いないうちに知らせが飛ぶ**ので、板集計をはじめに出すようにしたとき、
+    タブを一度も押さないとラインの一覧も期間も空のままになりました
+    (`views/plate.js` がその知らせで読み込みます)。
+    """
+
+    def test_タブは画面を組んだあとで配線する(self) -> None:
+        js = (JS_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertLess(js.index("plate.wire()"), js.index("tabs.wire()"))
+        self.assertLess(js.index("settings.wire()"), js.index("tabs.wire()"))
+
+
+class LotSearchScreenTests(unittest.TestCase):
+    """ロットを探すの欄(**必須のものが全部あるか**)。"""
+
+    def test_欄とボタンがそろっている(self) -> None:
+        for name in ("lot-start", "lot-end", "lot-no", "lot-line",
+                     "lot-run", "lot-csv", "lot-head", "lot-body"):
+            self.assertIn(f'id="{name}"', HTML, name)
+        self.assertIn("ロットを探す", HTML)
+        # 開始日・終了日・ロット№は**必須**の札を出します
+        for label in ("開始日", "終了日", "ロット№"):
+            at = HTML.index(f">{label}<")
+            self.assertIn("必須", HTML[at:at + 60], label)
+
+    def test_板集計タブの中にある(self) -> None:
+        panel = HTML.index('id="panel-plate"')
+        after = HTML.index('id="panel-settings"')
+        self.assertLess(panel, HTML.index('id="lot-run"') < after and
+                        HTML.index('id="lot-run"'))
+
+
 class FieldTests(unittest.TestCase):
     def test_パスの欄は横いっぱい(self) -> None:
         """共有の道は長いので、2列に並べると先が見えません。"""

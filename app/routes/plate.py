@@ -18,7 +18,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
 
-from converter import plate_graph, plate_out, plate_source, user_settings
+from converter import (plate_graph, plate_lot, plate_out, plate_source,
+                       user_settings)
 from converter.logging_utils import get_logger
 
 from . import Blueprint, Request, Response, json_response, refuse
@@ -173,3 +174,85 @@ def export(request: Request) -> Response:
     return json_response({"ok": True, "written": written,
                           "summary": collected.as_dict(),
                           "message": f"{written['name']} を書きました"})
+
+
+# ----------------------------------------------------------------------
+# ロットを探す(日報管理ツールの「ロットを探す」の移植)
+# ----------------------------------------------------------------------
+def _lot_ask(request: Request) -> tuple[dict, Response | None]:
+    """探す指定を確かめる。`(使える指定, 断り)`。
+
+    ラインは**「全ライン」も受けます**(`*`)── 期間とロット№だけ分かって
+    いて、どのラインか覚えていないことのほうが多いからです。
+    """
+    base, problem = _base()
+    if base is None:
+        return {}, refuse("板データを読めません", problem, status=400)
+    body = request.json()
+    line = str(body.get("line") or plate_lot.ALL_LINES).strip()
+    chosen: list[str] = []
+    if line and line != plate_lot.ALL_LINES:
+        real = {one.name for one in plate_source.lines(base) if one.has_aggregate}
+        if line not in real:
+            return {}, refuse("そのラインはありません",
+                              f"{line} ── 一覧から選び直してください", status=400)
+        chosen = [line]
+    start = plate_source.parse_date(str(body.get("start") or ""))
+    end = plate_source.parse_date(str(body.get("end") or ""))
+    if start is None:
+        return {}, refuse("開始日が読めません",
+                          "日付は 2026-11-01 のように指定してください", status=400)
+    if end is None:
+        return {}, refuse("終了日が読めません",
+                          "日付は 2026-11-30 のように指定してください", status=400)
+    return {"base": base, "lines": chosen, "start": start, "end": end,
+            "lot": str(body.get("lot") or "")}, None
+
+
+def _lot_search(ask: dict) -> tuple[plate_lot.Result | None, Response | None]:
+    try:
+        return plate_lot.search(ask["base"], ask["lines"], ask["start"],
+                                ask["end"], ask["lot"]), None
+    except plate_lot.BadRequest as exc:
+        return None, refuse(str(exc), "", status=400)
+    except OSError as exc:
+        return None, refuse("探せませんでした", str(exc), status=500)
+
+
+@bp.post("/api/plate/lots")
+def lots(request: Request) -> Response:
+    """期間とロット№で探す(**読むだけ**。何も書きません)。"""
+    ask, denied = _lot_ask(request)
+    if denied is not None:
+        return denied
+    result, failed = _lot_search(ask)
+    if failed is not None:
+        return failed
+    return json_response({"ok": True, **result.as_dict()})
+
+
+@bp.post("/api/plate/lots/export")
+def lots_export(request: Request) -> Response:
+    """当たった行を**出力先フォルダへ** CSV で書く(画面と同じ行)。"""
+    ask, denied = _lot_ask(request)
+    if denied is not None:
+        return denied
+    settings = user_settings.load()
+    problems = user_settings.problems(settings, need_input=False)
+    if problems:
+        return refuse("出力先が決まっていません", "／".join(problems), status=400)
+    result, failed = _lot_search(ask)
+    if failed is not None:
+        return failed
+    if not result.rows:
+        return json_response({"ok": False, **result.as_dict(),
+                              "message": "当たった行がないので書きませんでした"})
+    try:
+        written = plate_lot.write_csv(result, user_settings.ensure_output(settings),
+                                      start=ask["start"], end=ask["end"])
+    except OSError as exc:
+        log.warning("ロット検索のCSVを書けませんでした: %s", exc)
+        return refuse("書けませんでした", str(exc), status=500)
+    return json_response({"ok": True, **result.as_dict(), "written": written,
+                          "message": f"{written['name']} を書きました"
+                                     f"({written['rows']} 行)"})

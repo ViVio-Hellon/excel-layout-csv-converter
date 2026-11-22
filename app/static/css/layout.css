@@ -46,7 +46,15 @@ input[type=text] {
   background: var(--bg); color: var(--text); font-size: 13.5px;
   font-family: "Consolas", "Yu Gothic UI", monospace;
 }
-input[type=text]:focus { outline: 2px solid var(--accent); border-color: transparent; }
+input[type=text]:focus, select:focus, input[type=date]:focus {
+  outline: 2px solid var(--accent); border-color: transparent;
+}
+/* 日付とラインの欄も、道の欄と同じ見た目にそろえます */
+select, input[type=date] {
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--bg); color: var(--text); font-size: 13.5px;
+  font-family: var(--font);
+}
 .hint { font-size: 11.5px; color: var(--dim); min-height: 17px; word-break: break-all; }
 .hint.bad { color: var(--bad); }
 .hint.ok { color: var(--ok); }
