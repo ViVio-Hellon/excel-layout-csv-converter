@@ -230,8 +230,8 @@
            (<code>ｎ７１</code> → <code>N71</code>)。
            <b>読むだけ</b>で、何も書き換えません。</p>
         <div class="notice">
-           日報管理ツールの<b>「集計から除く」</b>で外した作業者のページは、集計に入らないので<b>集計明細CSVにも出ません</b>。そのページは<b>紙(印刷用HTML)から拾います</b> ── 同じ参照パスの <code>&lt;ライン&gt;\印刷\…</code> にあり、「どこから」の列に<b>印刷(集計から除く)</b>と出ます。
-           紙に無い欄(用途名・納入先・作業時間)は空のままです。
+           設定タブで<b>共有の日報データ</b>(<code>日報データ.sqlite3</code>)を指していれば、まずそこを読みます ── 日報管理ツールの「ロットを探す」と<b>同じ範囲</b>です(全ライン・全端末。<b>集計から除いた作業者のページ</b>も入っています)。
+           指していない・読めないときは、集計明細CSVと<b>紙(印刷用HTML)</b>で探します。集計から除いたページは集計明細CSVに出ないので、<b>紙のあるぶんだけ</b>出ます(「どこから」の列に出どころが出ます)。
         </div>
       </div>
 
@@ -267,6 +267,7 @@
 
       <div class="notice warn" id="lot-warn" hidden></div>
       <p class="hint" id="lot-summary"></p>
+      <p class="hint">探した範囲: <span id="lot-scope"></span></p>
       <div class="table-wrap">
         <table id="lot-table">
           <thead><tr id="lot-head"></tr></thead>
@@ -348,6 +349,19 @@
           ラインごとのフォルダ(<code>L-1</code> など)で、その中の
           <code>集計\2026.11\17</code> に日ごとのCSVが入っている形
           (日報管理ツールが書いた形)。</span>
+      </label>
+      <label class="field wide">
+        <span class="label">共有の日報データ<em>任意</em></span>
+        <input type="text" id="report_db" spellcheck="false"
+               placeholder="例: \\日報管理\日報データ.sqlite3">
+        <span class="hint" id="hint-report_db"></span>
+        <span class="hint"><b>ロットを探すが読みます</b>(読むだけです)。
+          日報管理ツールの各端末が「共有へ保存」で送っている先そのもので、
+          <b>控え(LocalBackup)ではありません</b>。ここを指すと、向こうの
+          「ロットを探す」と<b>同じ範囲</b>で探せます ──
+          <b>集計から除いた作業者のページ</b>も、紙を出していないページも
+          入っています。空なら集計明細CSVと紙で探します。
+          <b>Access(.accdb)は読みません</b>(向こうも読みません)。</span>
       </label>
       <label class="field wide">
         <span class="label">ログの置き場所<em>任意</em></span>

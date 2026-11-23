@@ -239,6 +239,7 @@ function paintLots(data) {
     body.append(line);
   });
   $("lot-summary").textContent = data.summary || "";
+  $("lot-scope").textContent = data.scope || "";
   const warn = $("lot-warn");
   const words = (data.warnings || []).join("\n");
   warn.hidden = !words;

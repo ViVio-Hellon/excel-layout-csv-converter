@@ -26,7 +26,7 @@ from . import app_config
 
 #: 画面から変えられる項目。**表示名の出どころもここ1つ**
 FIELDS = ("input_dir", "output_dir", "line", "ref_dir", "stop_csv",
-          "plate_dir", "log_dir")
+          "plate_dir", "report_db", "log_dir")
 
 LABELS = {
     "input_dir": "入力フォルダ",
@@ -35,6 +35,7 @@ LABELS = {
     "ref_dir": "参照用マスタの置き場所",
     "stop_csv": "停止内訳CSVの置き場所",
     "plate_dir": "板データ参照パス",
+    "report_db": "共有の日報データ",
     "log_dir": "ログの置き場所",
 }
 
@@ -61,6 +62,10 @@ class Settings:
     #: 板データ参照パス(板集計タブが読む根)。**配下はラインごとのフォルダ**
     #: (`<ここ>\L-1\集計\2026.11\17\集計_2026-11-17_L-1.csv`)
     plate_dir: str = ""
+    #: 共有の日報データ(`日報データ.sqlite3`)。**ロットを探すが読みます**
+    #: ── 日報管理ツールの各端末が「共有へ保存」で送っている先そのものです
+    #: (控え(LocalBackup)ではありません)。空なら読みません
+    report_db: str = ""
     #: ログの置き場所(空ならローカル領域の `logs`)。**書けなければ戻します**
     log_dir: str = ""
 
@@ -161,6 +166,23 @@ def describe_paths(settings: Settings) -> list[dict]:
             except ValueError as exc:
                 item["note"] = str(exc)
         found.append(item)
+
+    # 共有の日報データは**ファイル**です(`日報データ.sqlite3`)
+    item = {"key": "report_db", "label": LABELS["report_db"],
+            "text": settings.report_db, "resolved": "", "exists": False,
+            "note": ""}
+    if settings.report_db:
+        try:
+            path = resolve(settings.report_db)
+            item["resolved"] = str(path)
+            item["exists"] = path.is_file()
+            if not item["exists"]:
+                item["note"] = ("まだありません"
+                                if path.parent.is_dir()
+                                else "置き場所に届きません")
+        except ValueError as exc:
+            item["note"] = str(exc)
+    found.append(item)
 
     # 停止内訳CSVは**フォルダではなくファイル**を指します(フォルダを
     # 指されたら中の `停止内訳.csv`)。あるかどうかもファイルで見ます

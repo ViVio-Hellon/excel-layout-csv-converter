@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-from . import plate_graph, plate_paper, plate_source
+from . import plate_graph, plate_paper, plate_source, report_db
 from .logging_utils import get_logger
 
 log = get_logger("plate.lot")
@@ -87,7 +87,9 @@ COLUMNS: tuple[tuple[str, str, bool], ...] = (
     ("", "どこから", False),
 )
 
-#: 「どこから」の字
+#: 「どこから」の字。**共有の日報データがいちばん確か**です
+#: (全ライン・全端末の行が集まっていて、集計から除いたページも入っています)
+FROM_SHARED = "共有の日報"
 FROM_DETAIL = "集計明細"
 FROM_PAPER = "印刷(集計に無い)"
 FROM_PAPER_EXCLUDED = "印刷(集計から除く)"
@@ -145,6 +147,8 @@ class Result:
     summary: str = ""
     warnings: list[str] = field(default_factory=list)
     note: str = ""
+    #: どこを探したか(画面に出します)。共有の日報データを読めたかどうかで変わります
+    scope: str = ""
     skipped: list[dict[str, str]] = field(default_factory=list)
     files: int = 0
 
@@ -153,7 +157,7 @@ class Result:
                 "numeric": self.numeric, "rows": self.rows,
                 "total": self.total, "shown": self.shown,
                 "summary": self.summary, "warnings": self.warnings,
-                "note": self.note, "skipped": self.skipped,
+                "note": self.note, "scope": self.scope, "skipped": self.skipped,
                 "files": self.files, "limit": LIMIT}
 
 
@@ -182,11 +186,16 @@ def _sort_key(found: Found) -> tuple:
 
 
 def search(base: Path, lines: list[str], start: date, end: date,
-           lot: str) -> Result:
+           lot: str, *, shared: Path | None = None) -> Result:
     r"""期間とロット№で探す。**読むだけ**で、何も書きません。
 
     `lines` が空なら、参照パス直下で集計を持っているライン全部です
     (画面の「全ライン」)。
+
+    `shared` に共有の日報データ(`日報データ.sqlite3`)を渡すと、**そちらを
+    先に読みます** ── 全ライン・全端末の行が集まっていて、日報管理ツールの
+    「集計から除く」で外したページも入っているからです。読めなければ理由を
+    出して、集計明細CSVと紙で続けます。
     """
     wanted = tidy_lot(lot)
     if not wanted:
@@ -202,9 +211,16 @@ def search(base: Path, lines: list[str], start: date, end: date,
 
     result = Result(lot=wanted)
     found: list[Found] = []
-    #: 集計明細にあったページ(日付, ライン, 直, ページ)。紙はここに
-    #: 無いぶんだけ開きます
+    #: すでに出どころのあるページ(日付, ライン, 直, ページ)。
+    #: **上から順に強い**(共有 → 集計明細 → 紙)ので、下の出どころは
+    #: ここに無いぶんだけ読みます
     covered: set[tuple[str, str, str, str]] = set()
+    #: そのうち共有が持っていたページ(集計明細を飛ばすため)
+    from_shared: set[tuple[str, str, str, str]] = set()
+    found.extend(_from_shared(shared, lines, start, end, wanted, covered,
+                              result))
+    from_shared.update(covered)
+
     for line in lines:
         picked = [(day, folder) for day, folder in plate_source.days(base, line)
                   if start <= day <= end]
@@ -229,10 +245,13 @@ def search(base: Path, lines: list[str], start: date, end: date,
                     "reason": "集計明細CSVに「ロット№」の列がありません"})
                 continue
             for row in rows:
+                key = (stamp, line, row.get("直", ""),
+                       str(row.get("ページ", "")).strip())
+                if key in from_shared:
+                    continue              # 共有から読んだページ(二重に出さない)
                 # **当たらない行も、ページだけは覚えます** ── 紙を
                 # 読むかどうかの判断に使います(下の `_from_paper`)
-                covered.add((stamp, line, row.get("直", ""),
-                             str(row.get("ページ", "")).strip()))
+                covered.add(key)
                 if not tidy_lot(row.get("ロット№", "")).startswith(wanted):
                     continue
                 found.append(Found(date=row.get("日付") or stamp,
@@ -250,6 +269,14 @@ def search(base: Path, lines: list[str], start: date, end: date,
     result.total = len(found)
     result.shown = len(shown)
     result.note = note_of(lines, start, end)
+    if not result.scope:
+        result.scope = ("集計明細CSVと紙(印刷用HTML)"
+                        if shared is None else
+                        "集計明細CSVと紙(印刷用HTML) ── 共有の日報データは"
+                        "読めませんでした")
+    else:
+        result.scope = ("共有の日報データ(全ライン・全端末)"
+                        " + 集計明細CSV + 紙(印刷用HTML)")
 
     if result.total:
         lots = {tidy_lot(one.lot) for one in found}
@@ -276,6 +303,42 @@ def search(base: Path, lines: list[str], start: date, end: date,
              wanted, plate_source.date_text(start), plate_source.date_text(end),
              "／".join(lines), result.total, result.files)
     return result
+
+
+def _from_shared(shared: Path | None, lines: list[str], start: date, end: date,
+                 wanted: str, covered: set, result: "Result") -> list[Found]:
+    r"""**共有の日報データ**(`日報データ.sqlite3`)から拾う。
+
+    ここが読めれば、日報管理ツールの「ロットを探す」と**同じ範囲**です
+    ── 集計から除いたページも、紙を出していないページも入っています。
+    読めなければ理由を画面に出して、集計明細CSVと紙で続けます
+    (向こうも読めないときは手元で続けます)。
+    """
+    if shared is None:
+        return []
+    read = report_db.lot_rows(shared, lines, start, end,
+                              lambda text: tidy_lot(text).startswith(wanted))
+    result.files += 1
+    if not read.ok:
+        result.warnings.append(
+            read.reason() + "、集計明細CSVと紙で探しました"
+            "(集計から除いた作業者のページは、紙のあるぶんだけ出ます)")
+        return []
+    result.scope = FROM_SHARED
+    if read.truncated:
+        result.warnings.append(
+            f"共有の日報データで当たった行が {report_db.CAP}行 を超えたので、"
+            "そこで読むのをやめました。ロット№の桁を増やすか、期間を"
+            "絞ってください")
+    out: list[Found] = []
+    for row in read.rows:
+        covered.add((row["日付"], row["ライン"], row["直"], row["ページ"]))
+        out.append(Found(date=row["日付"], line=row["ライン"],
+                         shift=row["直"], row=row, source=FROM_SHARED))
+    # **当たらなかったページも覆いたい**のですが、共有は当たった行しか
+    # 持ってきません(そのほうが速い)。覆うのは当たった行のページだけで、
+    # 同じページの同じ行が集計明細からも出ないようにします
+    return out
 
 
 def _from_paper(base: Path, lines: list[str], start: date, end: date,

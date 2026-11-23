@@ -19,7 +19,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from converter import (plate_graph, plate_lot, plate_out, plate_source,
-                       user_settings)
+                       report_db, user_settings)
 from converter.logging_utils import get_logger
 
 from . import Blueprint, Request, Response, json_response, refuse
@@ -74,11 +74,18 @@ def read(request: Request) -> Response:
     if base is None:
         return json_response({"ok": False, "problem": problem, "lines": []})
     found = plate_source.lines(base)
+    shared = _shared()
+    read = report_db.state(shared) if shared else None
     return json_response({
         "ok": True, "base": str(base), "problem": "",
         "lines": [one.as_dict() for one in found],
         "span": _span(found),
         "max_days": plate_source.MAX_DAYS,
+        # 共有の日報データ(ロットを探すの本命)。未設定なら `None`
+        "shared": None if read is None else {
+            "path": str(shared), "ok": read.ok, "reason": read.reason(),
+            "lines": read.lines,
+        },
     })
 
 
@@ -206,13 +213,29 @@ def _lot_ask(request: Request) -> tuple[dict, Response | None]:
         return {}, refuse("終了日が読めません",
                           "日付は 2026-11-30 のように指定してください", status=400)
     return {"base": base, "lines": chosen, "start": start, "end": end,
-            "lot": str(body.get("lot") or "")}, None
+            "lot": str(body.get("lot") or ""), "shared": _shared()}, None
+
+
+def _shared() -> Path | None:
+    """共有の日報データ(`日報データ.sqlite3`)。設定が空なら `None`。
+
+    **読めるかどうかはここで決めません** ── 読めなかった理由は
+    `converter.plate_lot` が画面に出します(探すのはやめません)。
+    """
+    text = user_settings.load().report_db
+    if not text:
+        return None
+    try:
+        return user_settings.resolve(text)
+    except ValueError:
+        return None
 
 
 def _lot_search(ask: dict) -> tuple[plate_lot.Result | None, Response | None]:
     try:
         return plate_lot.search(ask["base"], ask["lines"], ask["start"],
-                                ask["end"], ask["lot"]), None
+                                ask["end"], ask["lot"],
+                                shared=ask.get("shared")), None
     except plate_lot.BadRequest as exc:
         return None, refuse(str(exc), "", status=400)
     except OSError as exc:

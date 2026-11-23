@@ -58,12 +58,12 @@ README_NAME = "はじめに読む.txt"
 #: ログの置き場所も配ります ── 共有へ集める運用のとき、1台ずつ
 #: 打つと必ず打ち漏れが出ます
 ITEMS: tuple[str, ...] = ("input_dir", "output_dir", "ref_dir", "stop_csv",
-                          "plate_dir", "log_dir", "line")
+                          "plate_dir", "report_db", "log_dir", "line")
 
 #: 既定で選ぶ項目。**ラインは端末ごとに違う**ので外します
 #: (同じラインの端末へ配るときは、画面で選べば入ります)
 DEFAULT_ITEMS: tuple[str, ...] = ("output_dir", "ref_dir", "stop_csv",
-                                  "plate_dir", "log_dir")
+                                  "plate_dir", "report_db", "log_dir")
 
 #: 書き出した形の版。読むときに見ます(違う版は読みません)
 FORMAT = 1

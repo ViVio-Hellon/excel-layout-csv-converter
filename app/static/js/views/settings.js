@@ -8,7 +8,7 @@ import { api, reason } from "../api.js";
 import * as toast from "../toast.js";
 
 const FIELDS = ["input_dir", "output_dir", "line", "ref_dir", "stop_csv",
-                "plate_dir", "log_dir"];
+                "plate_dir", "report_db", "log_dir"];
 const $ = (id) => document.getElementById(id);
 
 function show(data) {

@@ -1012,3 +1012,174 @@ class PaperTests(WebCase):
             self.put_paper("L-1", "2026-11-17", "1直", page)
         got = self.find("X71")
         self.assertTrue(any("紙が" in one for one in got.warnings))
+
+
+def make_report_db(path: Path, line: str, rows, *, page_column: str = "頁",
+                   worker: str = "山田") -> Path:
+    r"""共有の日報データ(`日報データ.sqlite3`)を作る。
+
+    表の名前も列も、日報管理ツールが作るものと同じです
+    (`access_bridge/sqlite_backend.py` の `HEADER_COLUMNS` / `DETAIL_COLUMNS`)。
+    `rows` は `(報告日, 直, 頁, 行番号, LOT)`。
+    """
+    import sqlite3
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    head = f'T_日報ヘッダー_{line}'
+    detail = f'T_日報明細_{line}'
+    conn.execute(f'CREATE TABLE "{head}" ("報告日" TEXT, "ライン" TEXT, "直" TEXT,'
+                 f' "{page_column}" INTEGER, "担当者" TEXT, "昼勤" TEXT,'
+                 ' "枚数" TEXT, "重量Kg" TEXT, "理由" TEXT, "保存日時" TEXT)')
+    conn.execute(f'CREATE TABLE "{detail}" ("報告日" TEXT, "ライン" TEXT, "直" TEXT,'
+                 f' "{page_column}" INTEGER, "行番号" INTEGER, "LOT" TEXT,'
+                 ' "ZAI" TEXT, "SIZ" TEXT, "KEN" TEXT, "KZ" TEXT, "KH" TEXT,'
+                 ' "SZ" TEXT, "SH" TEXT, "CON" TEXT, "WEI" TEXT, "TIM" TEXT,'
+                 ' "Others2" TEXT, "Others3" TEXT)')
+    seen = set()
+    for stamp, shift, page, row_no, lot in rows:
+        if (stamp, shift, page) not in seen:
+            seen.add((stamp, shift, page))
+            conn.execute(f'INSERT INTO "{head}" VALUES (?,?,?,?,?,?,?,?,?,?)',
+                         (stamp, line, shift, page, worker, "有", "100",
+                          "2400", "", "2026-11-17 18:00"))
+        conn.execute(f'INSERT INTO "{detail}" VALUES'
+                     ' (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                     (stamp, line, shift, page, row_no, lot, "SS400",
+                      "3.2×1219×2438", "40", "08", "15", "09", "40",
+                      "40", "2.40", "85", "外販", "〇〇鋼材"))
+    conn.commit()
+    conn.close()
+    return path
+
+
+class ReportDbTests(WebCase):
+    r"""共有の日報データ ── **ロットを探すの本命**
+
+    日報管理ツールの各端末が「共有へ保存」で送っている先そのものです
+    (控え(LocalBackup)ではありません)。ここを読めば、向こうの
+    「ロットを探す」と**同じ範囲**になります ── 集計から除いた作業者の
+    ページも、紙を出していないページも入っています。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.tmp / "板"
+        self.base.mkdir()
+        self.db = make_report_db(
+            self.tmp / "共有" / "日報データ.sqlite3", "L-1",
+            [("2026年11月17日", "1直", 1, 1, "N7131T0"),
+             ("2026年11月17日", "1直", 1, 2, "N7132T0"),
+             ("2026年11月18日", "2直", 2, 1, "X9001A0")])
+
+    def find(self, lot: str, *, shared=None, lines=None):
+        from converter import plate_lot
+        # `shared=False` で「指していない」、省略で既定の共有を使います
+        use = self.db if shared is None else (shared or None)
+        return plate_lot.search(self.base, lines or ["L-1"], DAY1, DAY30, lot,
+                                shared=use)
+
+    # -- 読み手 ------------------------------------------------------
+    def test_日付の書き方は年月日でも読む(self) -> None:
+        from converter import report_db
+        self.assertEqual(report_db.parse_report_date("2026年11月17日"),
+                         datetime.date(2026, 11, 17))
+        self.assertEqual(report_db.parse_report_date("2026-11-17"),
+                         datetime.date(2026, 11, 17))
+        self.assertIsNone(report_db.parse_report_date("なにか"))
+
+    def test_表の名前からラインを拾う(self) -> None:
+        import sqlite3
+
+        from converter import report_db
+        conn = sqlite3.connect(self.db)
+        self.addCleanup(conn.close)
+        self.assertEqual(sorted(report_db.tables(conn)), ["L-1"])
+
+    def test_ページの列は頁でもページでも読む(self) -> None:
+        path = make_report_db(self.tmp / "共有2" / "日報データ.sqlite3", "L-2",
+                              [("2026年11月17日", "1直", 3, 1, "K9001A0")],
+                              page_column="ページ")
+        got = self.find("K900", shared=path, lines=["L-2"])
+        self.assertEqual(got.total, 1)
+        self.assertEqual(got.rows[0][got.columns.index("ページ")], "3")
+
+    def test_読むだけで書かない(self) -> None:
+        """`?mode=ro` で開きます ── 無いファイルを作らず、書けません。"""
+        before = self.db.stat().st_mtime_ns
+        self.find("N71")
+        self.assertEqual(self.db.stat().st_mtime_ns, before)
+        self.assertFalse((self.tmp / "共有" / "日報データ.sqlite3-wal").exists())
+
+    # -- 探すほうと合わせて ------------------------------------------
+    def test_共有から探せる(self) -> None:
+        got = self.find("N713")
+        self.assertEqual(got.total, 2)
+        at = got.columns.index("どこから")
+        from converter import plate_lot
+        self.assertEqual({row[at] for row in got.rows}, {plate_lot.FROM_SHARED})
+        row = got.rows[0]
+        self.assertEqual(row[got.columns.index("作業日")], "2026-11-17")
+        self.assertEqual(row[got.columns.index("開始")], "08:15")
+        self.assertEqual(row[got.columns.index("用途名")], "外販")
+        self.assertEqual(row[got.columns.index("作業者")], "山田")
+        self.assertIn("共有の日報データ", got.scope)
+
+    def test_集計に無いページも出る(self) -> None:
+        """**ここが本題。** 集計から除いたページも共有には残っています。"""
+        write_day(self.base, "L-1", "2026-11-18",
+                  lots=[("1直", 1, 1, "N7131T0")])     # 集計に入ったページだけ
+        got = self.find("X9001")                        # 集計に無いロット
+        self.assertEqual(got.total, 1)
+        self.assertEqual(got.rows[0][got.columns.index("ページ")], "2")
+
+    def test_同じページを二重に出さない(self) -> None:
+        write_day(self.base, "L-1", "2026-11-17",
+                  lots=[("1直", 1, 1, "N7131T0"), ("1直", 1, 2, "N7132T0")])
+        got = self.find("N713")
+        self.assertEqual(got.total, 2)                  # 共有のぶんだけ
+        from converter import plate_lot
+        at = got.columns.index("どこから")
+        self.assertEqual({row[at] for row in got.rows}, {plate_lot.FROM_SHARED})
+
+    def test_共有を指していなければ集計明細で探す(self) -> None:
+        write_day(self.base, "L-1", "2026-11-17",
+                  lots=[("1直", 1, 1, "N7131T0")])
+        got = self.find("N713", shared=False)
+        from converter import plate_lot
+        self.assertEqual(got.total, 1)
+        self.assertEqual(got.rows[0][got.columns.index("どこから")],
+                         plate_lot.FROM_DETAIL)
+        self.assertIn("集計明細", got.scope)
+
+    # -- 読めないとき ------------------------------------------------
+    def test_無ければ理由を出して探し続ける(self) -> None:
+        write_day(self.base, "L-1", "2026-11-17",
+                  lots=[("1直", 1, 1, "N7131T0")])
+        got = self.find("N713", shared=self.tmp / "共有" / "まだ無い.sqlite3")
+        self.assertEqual(got.total, 1)                  # 集計明細から出ます
+        self.assertTrue(any("まだ無い" in one for one in got.warnings))
+
+    def test_Accessは読まない(self) -> None:
+        """ロット№の比べ方が Access の SQL では書けません(向こうも読みません)。"""
+        path = self.tmp / "共有" / "日報データ.accdb"
+        path.write_bytes(b"dummy")
+        got = self.find("N713", shared=path)
+        self.assertTrue(any("Access" in one for one in got.warnings))
+
+    def test_壊れていても探し続ける(self) -> None:
+        path = self.tmp / "共有" / "壊れ.sqlite3"
+        path.write_text("これはDBではありません", encoding="utf-8")
+        write_day(self.base, "L-1", "2026-11-17",
+                  lots=[("1直", 1, 1, "N7131T0")])
+        got = self.find("N713", shared=path)
+        self.assertEqual(got.total, 1)
+        self.assertTrue(got.warnings)
+
+    def test_多すぎたらそこでやめる(self) -> None:
+        from converter import report_db
+        original = report_db.CAP
+        report_db.CAP = 1
+        self.addCleanup(setattr, report_db, "CAP", original)
+        got = self.find("N713")
+        self.assertTrue(any("超えた" in one for one in got.warnings))
