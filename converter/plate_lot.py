@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-from . import plate_graph, plate_source
+from . import plate_graph, plate_paper, plate_source
 from .logging_utils import get_logger
 
 log = get_logger("plate.lot")
@@ -82,7 +82,15 @@ COLUMNS: tuple[tuple[str, str, bool], ...] = (
     ("作業者", "作業者", False),
     ("用途名", "用途名", False),
     ("納入先", "納入先", False),
+    # **どこから読んだ行か。** 集計に入っていないページ(集計から除く
+    # 作業者)は紙からしか拾えないので、見ただけで分かるようにします
+    ("", "どこから", False),
 )
+
+#: 「どこから」の字
+FROM_DETAIL = "集計明細"
+FROM_PAPER = "印刷(集計に無い)"
+FROM_PAPER_EXCLUDED = "印刷(集計から除く)"
 
 #: 開始・終了は「時」と「分」が別の欄なので、`08:15` に組み直します
 _CLOCK = {"開始": ("梱包作業時間 開始 時", "梱包作業時間 開始 分"),
@@ -117,6 +125,7 @@ class Found:
     line: str
     shift: str
     row: dict[str, str]
+    source: str = ""
 
     @property
     def lot(self) -> str:
@@ -157,6 +166,8 @@ def _clock(row: dict[str, str], which: str) -> str:
 
 
 def _cell(found: Found, key: str, label: str) -> str:
+    if label == "どこから":
+        return found.source
     if not key:
         return _clock(found.row, label)
     return (found.row.get(key) or "").strip()
@@ -191,6 +202,9 @@ def search(base: Path, lines: list[str], start: date, end: date,
 
     result = Result(lot=wanted)
     found: list[Found] = []
+    #: 集計明細にあったページ(日付, ライン, 直, ページ)。紙はここに
+    #: 無いぶんだけ開きます
+    covered: set[tuple[str, str, str, str]] = set()
     for line in lines:
         picked = [(day, folder) for day, folder in plate_source.days(base, line)
                   if start <= day <= end]
@@ -215,12 +229,18 @@ def search(base: Path, lines: list[str], start: date, end: date,
                     "reason": "集計明細CSVに「ロット№」の列がありません"})
                 continue
             for row in rows:
+                # **当たらない行も、ページだけは覚えます** ── 紙を
+                # 読むかどうかの判断に使います(下の `_from_paper`)
+                covered.add((stamp, line, row.get("直", ""),
+                             str(row.get("ページ", "")).strip()))
                 if not tidy_lot(row.get("ロット№", "")).startswith(wanted):
                     continue
                 found.append(Found(date=row.get("日付") or stamp,
                                    line=row.get("ライン") or line,
-                                   shift=row.get("直", ""), row=row))
+                                   shift=row.get("直", ""), row=row,
+                                   source=FROM_DETAIL))
 
+    found.extend(_from_paper(base, lines, start, end, wanted, covered, result))
     found.sort(key=_sort_key)
     shown = found[:LIMIT]
     result.columns = [label for _, label, _ in COLUMNS]
@@ -256,6 +276,59 @@ def search(base: Path, lines: list[str], start: date, end: date,
              wanted, plate_source.date_text(start), plate_source.date_text(end),
              "／".join(lines), result.total, result.files)
     return result
+
+
+def _from_paper(base: Path, lines: list[str], start: date, end: date,
+                wanted: str, covered: set, result: "Result") -> list[Found]:
+    r"""**集計に入っていないページ**を、紙(印刷用HTML)から拾う。
+
+    日報管理ツールの「集計から除く」(除く作業者のいるページ)は、集計に
+    入らないので集計明細CSVにも出ません。ページそのものは消えず、紙は
+    残っているので、**集計明細に無かったページの紙だけ**を開きます ──
+    ふだん(除外が無い日)は1枚も開きません。
+
+    紙には用途名・納入先・作業時間の欄がありません(紙の印刷範囲の外)。
+    空欄のまま出します ── 無い欄を埋めるより、**無いと分かる**ほうが
+    親切です。
+    """
+    out: list[Found] = []
+    opened = 0
+    for line in lines:
+        for stamp, name, shift, page, path in plate_paper.pages(
+                base, line, start, end):
+            if (stamp, line, shift, page) in covered:
+                continue                  # 集計明細にあるページ(開きません)
+            if opened >= plate_paper.MAX_FILES:
+                result.warnings.append(
+                    f"集計に無いページの紙が {plate_paper.MAX_FILES} 枚を"
+                    "超えたので、そこで読むのをやめました(期間を絞ってください)")
+                return out
+            sheet = plate_paper.read(path)
+            opened += 1
+            result.files += 1
+            if sheet is None:
+                result.skipped.append({"line": line, "date": stamp,
+                                       "reason": f"紙を読めません({path.name})"})
+                continue
+            source = (FROM_PAPER_EXCLUDED if sheet.excluded else FROM_PAPER)
+            for row in sheet.rows:
+                if not tidy_lot(row.get("ロット№", "")).startswith(wanted):
+                    continue
+                row = dict(row)
+                row.setdefault("作業者", sheet.worker)
+                # 紙の行には日付・ライン・直が入っていません(紙の頭に
+                # 1つだけ書いてあります)。**行ごとに入れ直します** ──
+                # 表に並べたときに空欄だと、どの日のものか分かりません
+                row["日付"] = stamp
+                row["ライン"] = name or line
+                row["直"] = shift
+                row["ページ"] = page
+                out.append(Found(date=stamp, line=name or line, shift=shift,
+                                 row=row, source=source))
+    if opened:
+        log.info("集計に無いページの紙を %d 枚読みました(当たり %d 行)",
+                 opened, len(out))
+    return out
 
 
 def note_of(lines: list[str], start: date, end: date) -> str:

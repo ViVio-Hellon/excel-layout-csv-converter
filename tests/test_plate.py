@@ -20,8 +20,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from converter import (plate_graph, plate_out, plate_source,  # noqa: E402
-                       user_settings, xlsx_out)
+from converter import (plate_graph, plate_out, plate_paper,  # noqa: E402
+                       plate_source, user_settings, xlsx_out)
+from tests._paper_sample import SAMPLE                       # noqa: E402
 from tests._web import WebCase                               # noqa: E402
 
 DAY1 = datetime.date(2026, 11, 1)
@@ -891,3 +892,123 @@ class LotRouteTests(WebCase):
         status, data = self.ask({"lot": "N71"})
         self.assertEqual(status, 400)
         self.assertIn("板データ参照パス", data["detail"])
+
+
+class PaperTests(WebCase):
+    r"""集計に入っていないページを、紙(印刷用HTML)から拾う
+
+    日報管理ツールの「集計から除く」で外した作業者のページは、**集計に
+    入らないので集計明細CSVにも出ません**(外れるのは集計を作るところ
+    ── `services/agg_exclude`)。ページそのものは消えず、紙は残るので、
+    そこから拾います。向こうの「ロットを探す」でも除く人のページは出る
+    ので、**同じ範囲で探せる**ようにするためです。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.tmp / "板"
+        self.base.mkdir()
+
+    def put_paper(self, line: str, stamp: str, shift: str, page: int,
+                  text: str = "") -> Path:
+        """紙を1枚置く(`<ライン>\\印刷\\年.月\\日\\印刷_….html`)。"""
+        parts = stamp.split("-")
+        folder = (self.base / line / "印刷" / f"{parts[0]}.{parts[1]}"
+                  / parts[2])
+        folder.mkdir(parents=True, exist_ok=True)
+        day = f"{int(parts[0])}年{int(parts[1])}月{int(parts[2])}日"
+        path = folder / f"印刷_{day}_{line}_{shift}_{page}.html"
+        path.write_text(text or SAMPLE, encoding="utf-8")
+        return path
+
+    # -- 読み手 ------------------------------------------------------
+    def test_本物の紙を読める(self) -> None:
+        """見出しは**集計明細CSVと同じ字**になります(位置ではなく名前で拾うため)。"""
+        sheet = plate_paper.parse(SAMPLE)[0]
+        self.assertEqual(sheet.columns[0], "ロット№")
+        self.assertIn("梱包作業時間 開始 時", sheet.columns)
+        self.assertIn("製品寸法 厚×幅×丈", sheet.columns)
+        self.assertIn("実績合計 重量", sheet.columns)
+        self.assertEqual(sheet.worker, "除外 太郎")
+        self.assertTrue(sheet.excluded)             # 「自動」の印
+        # 打ってある行だけ(紙は12行ぶん罫線がありますが、空行は拾いません)
+        self.assertEqual([row["ロット№"] for row in sheet.rows],
+                         ["X7101", "X7103"])
+        self.assertEqual([row["行"] for row in sheet.rows], ["1", "3"])
+        one = sheet.rows[0]
+        self.assertEqual(one["製品寸法 厚×幅×丈"], "3.2×1219×2438")
+        self.assertEqual(one["梱包作業時間 開始 時"], "08")
+        self.assertEqual(one["実績合計 重量"], "2.40")
+
+    def test_合計の表は読まない(self) -> None:
+        """紙には明細のあとに合計が続きます。ロットの行は明細だけです。"""
+        sheet = plate_paper.parse(SAMPLE)[0]
+        self.assertEqual(len(sheet.rows), 2)
+
+    def test_壊れていても落ちない(self) -> None:
+        self.assertEqual(plate_paper.parse("<html><p>なにか"), [])
+        path = self.put_paper("L-1", "2026-11-17", "1直", 1, text="壊れています")
+        self.assertIsNone(plate_paper.read(path))
+
+    def test_ファイル名から日付とラインと直とページを取る(self) -> None:
+        self.put_paper("L-1", "2026-11-17", "2直", 3)
+        found = plate_paper.pages(self.base, "L-1", DAY1, DAY30)
+        self.assertEqual([(d, line, shift, page)
+                          for d, line, shift, page, _ in found],
+                         [("2026-11-17", "L-1", "2直", "3")])
+        # 期間の外は並べません
+        self.assertEqual(plate_paper.pages(self.base, "L-1",
+                                           datetime.date(2026, 10, 1),
+                                           datetime.date(2026, 10, 31)), [])
+
+    # -- 探すほうと合わせて ------------------------------------------
+    def find(self, lot: str):
+        from converter import plate_lot
+        return plate_lot.search(self.base, ["L-1"], DAY1, DAY30, lot)
+
+    def test_集計に無いページのロットも出る(self) -> None:
+        """**ここが本題。** 集計から除かれたロットも探せます。"""
+        # 1ページ目は集計に入り、2ページ目は集計から除かれた(紙だけ残る)
+        write_day(self.base, "L-1", "2026-11-17",
+                  lots=[("1直", 1, 1, "N7131T0")])
+        self.put_paper("L-1", "2026-11-17", "1直", 2)
+        from converter import plate_lot
+        got = self.find("X71")
+        self.assertEqual(got.total, 2)                  # X7101 / X7103
+        at = got.columns.index("どこから")
+        self.assertEqual({row[at] for row in got.rows},
+                         {plate_lot.FROM_PAPER_EXCLUDED})
+        # 紙に無い欄(用途名・納入先)は空のまま ── 無いと分かるように
+        self.assertEqual(got.rows[0][got.columns.index("用途名")], "")
+        self.assertEqual(got.rows[0][got.columns.index("作業者")], "除外 太郎")
+        # 紙の行には日付・ライン・直が入っていないので、入れ直します
+        self.assertEqual(got.rows[0][got.columns.index("作業日")], "2026-11-17")
+        self.assertEqual(got.rows[0][got.columns.index("ライン")], "L-1")
+        self.assertEqual(got.rows[0][got.columns.index("直")], "1直")
+        self.assertEqual(got.rows[0][got.columns.index("ページ")], "2")
+
+    def test_集計にあるページの紙は開かない(self) -> None:
+        """同じページを二重に数えません(**ふだんは1枚も開きません**)。"""
+        write_day(self.base, "L-1", "2026-11-17",
+                  lots=[("1直", 1, 1, "X7101"), ("1直", 1, 3, "X7103")])
+        self.put_paper("L-1", "2026-11-17", "1直", 1)
+        from converter import plate_lot
+        got = self.find("X71")
+        self.assertEqual(got.total, 2)
+        at = got.columns.index("どこから")
+        self.assertEqual({row[at] for row in got.rows}, {plate_lot.FROM_DETAIL})
+
+    def test_集計明細が1本も無くても紙から探せる(self) -> None:
+        self.put_paper("L-1", "2026-11-17", "1直", 1)
+        got = self.find("X7103")
+        self.assertEqual(got.total, 1)
+        self.assertEqual(got.rows[0][got.columns.index("ロット№")], "X7103")
+
+    def test_開く紙が多すぎたらそこでやめる(self) -> None:
+        original = plate_paper.MAX_FILES
+        plate_paper.MAX_FILES = 1
+        self.addCleanup(setattr, plate_paper, "MAX_FILES", original)
+        for page in (1, 2, 3):
+            self.put_paper("L-1", "2026-11-17", "1直", page)
+        got = self.find("X71")
+        self.assertTrue(any("紙が" in one for one in got.warnings))
