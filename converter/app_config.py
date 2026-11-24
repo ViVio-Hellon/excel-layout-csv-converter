@@ -172,6 +172,18 @@ def config_stamp() -> str:
     return when.strftime("%Y-%m-%d %H:%M")
 
 
+def moved_inside() -> str:
+    r"""**窓(exe)が、1つ下の新しい中身へ移って動いているなら**その元の場所。
+
+    入れ子(`…\main\main\`)に展開されても動くように、窓(Rust)は自分と
+    同じ階層の `bridge.py` を見つけたあと、**直下に版の新しい中身が
+    無いか**も見て、あればそちらで動かします(`XLCSV_INSIDE_FROM` に
+    元の場所が入ります)。黙って別のフォルダで動くと分からないので、
+    診断情報と帯に出します。
+    """
+    return os.environ.get("XLCSV_INSIDE_FROM", "").strip()
+
+
 #: 中を覗くフォルダの数の上限(**深くは潜りません** ── 直下だけ)
 _LOOK_INSIDE = 40
 
@@ -219,7 +231,16 @@ def version_note() -> str:
     気づけるように、ここで食い違いを言います。
     """
     exe = exe_version()
+    moved = moved_inside()
     if not exe or exe == version():
+        if moved:
+            # **版は揃っています**(だから「古いまま」ではありません)。
+            # ただ、exe と違うフォルダの中身で動いているので断ります
+            return (f"新しい中身(VER{version()})が1つ下に入っていたので、"
+                    f"{APP_ROOT} の中身で動かしています"
+                    f"(exe が置かれているのは {moved})。"
+                    "そのままで使えますが、落ち着いたら中身を1つ上へ"
+                    "移しておくと分かりやすくなります。")
         return ""
     # 画面の札(title)とログに出ます。**飾り字を入れません** ──
     # そのまま読まれる場所なので、`**` が見えてしまいます
@@ -415,7 +436,8 @@ def describe() -> str:
         + (f"   窓(exe): {exe_version()}" if exe_version() else ""),
         f"監視レベル    : {monitor_level()}",
         f"設定ファイル  : {CONFIG_PATH}",
-        f"アプリ本体    : {APP_ROOT}",
+        f"アプリ本体    : {APP_ROOT}"
+        + (f"   (exe は {moved_inside()})" if moved_inside() else ""),
         f"ローカル領域  : {local_root()}",
         f"待ち受け      : {base_url()}",
         f"受け入れ上限  : {max_files()} 本 / 1本 {max_file_bytes() // 1024 // 1024}MB",

@@ -57,9 +57,70 @@ fn is_app_url(url: &tauri::Url) -> bool {
     }
 }
 
+/// 中身を探すときに見る、直下のフォルダの数の上限(多すぎるフォルダを総なめしない)
+const LOOK_INSIDE: usize = 40;
+
+/// 入れ子をたどる深さの上限(`main\main\main` のような二重三重も拾う)
+const LOOK_DEEP: usize = 3;
+
+/// `config/app.json` の版を数字3つで。読めなければ `None`。
+fn version_of(root: &Path) -> Option<(u64, u64, u64)> {
+    let text = std::fs::read_to_string(root.join("config").join("app.json")).ok()?;
+    let conf: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let raw = conf.get("version")?.as_str()?;
+    let mut parts = raw.split('.').map(|p| p.trim().parse::<u64>().ok());
+    Some((parts.next()??, parts.next()??, parts.next()??))
+}
+
+/// 直下に**より新しい中身**が入っていれば、そのフォルダ。
+///
+/// Windows の「すべて展開」は、同じ名前のフォルダがすでにあるところへ
+/// 展開すると1つ下へ入れ子になります(`…\main\main\`)。exe は自分と同じ
+/// 階層の `bridge.py` を使うので、**新しい中身が1つ下に入ったまま古い
+/// 中身で動く**ことがありました ── そのときはこちらから下を見ます。
+///
+/// **上げる方向にしか動きません。** 版が読めないフォルダ・同じ版・古い版は
+/// 選びません(古いものをわざと脇に置いてある端末を巻き込まないため)。
+fn newer_inside(root: &Path) -> Option<PathBuf> {
+    let mut best = version_of(root)?;
+    let mut found = None;
+    for entry in std::fs::read_dir(root).ok()?.flatten().take(LOOK_INSIDE) {
+        let dir = entry.path();
+        if !dir.is_dir() || !dir.join("bridge.py").is_file() {
+            continue;
+        }
+        if let Some(version) = version_of(&dir) {
+            if version > best {
+                best = version;
+                found = Some(dir);
+            }
+        }
+    }
+    found
+}
+
 /// ツール一式の置き場所。`bridge.py` が居るフォルダを、exe から上へたどって探します。
 /// `XLCSV_ROOT` で指定もできます(開発中に `target/release` から動かすため)。
+///
+/// 見つけたあと、**1つ下に新しい中身が入っていないか**も見ます(`newer_inside`)。
+/// 入っていればそちらで動かし、どこへ移ったかを `XLCSV_INSIDE_FROM` で
+/// Python 側へ伝えます(画面と診断情報に出します)。
 fn app_root() -> PathBuf {
+    let found = picked_root();
+    let mut at = found.clone();
+    for _ in 0..LOOK_DEEP {
+        match newer_inside(&at) {
+            Some(deeper) => at = deeper,
+            None => break,
+        }
+    }
+    if at != found {
+        std::env::set_var("XLCSV_INSIDE_FROM", &found);
+    }
+    at
+}
+
+fn picked_root() -> PathBuf {
     if let Ok(found) = std::env::var("XLCSV_ROOT") {
         let path = PathBuf::from(found);
         if path.join("bridge.py").is_file() {
@@ -470,6 +531,41 @@ mod tests {
         std::env::remove_var("XLCSV_ROOT");
 
         std::env::set_var("XLCSV_LOCAL_DIR", dir.join("local"));
+
+        // 入れ子: 1つ下に新しい中身があれば、そちらで動かす
+        let nest = dir.join("excel-layout-csv-converter-main");
+        std::fs::create_dir_all(nest.join("config")).unwrap();
+        std::fs::write(nest.join("bridge.py"), "").unwrap();
+        std::fs::write(
+            dir.join("config").join("app.json"),
+            r#"{"local_dir_name": "変換器テスト", "version": "1.12.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nest.join("config").join("app.json"),
+            r#"{"version": "1.15.2"}"#,
+        )
+        .unwrap();
+        assert_eq!(newer_inside(&dir).as_deref(), Some(nest.as_path()));
+        std::env::set_var("XLCSV_ROOT", &dir);
+        assert_eq!(app_root(), nest, "新しい中身が1つ下にあればそちらを使う");
+        assert_eq!(
+            std::env::var("XLCSV_INSIDE_FROM").unwrap(),
+            dir.to_string_lossy(),
+            "どこから移ったかを Python へ伝える"
+        );
+        // 古い中身・同じ版は選ばない(わざと脇に置いたものを巻き込まない)
+        std::fs::write(
+            nest.join("config").join("app.json"),
+            r#"{"version": "1.11.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(newer_inside(&dir), None, "古い中身は選ばない");
+        assert_eq!(app_root(), dir);
+        std::env::remove_var("XLCSV_ROOT");
+        std::env::remove_var("XLCSV_INSIDE_FROM");
+        std::fs::remove_dir_all(&nest).unwrap();
+
         let first = take_instance_lock(&dir);
         assert!(first.is_some(), "1つ目は錠を取れる");
         assert!(take_instance_lock(&dir).is_none(), "2つ目は取れない");

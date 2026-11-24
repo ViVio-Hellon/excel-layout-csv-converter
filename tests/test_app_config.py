@@ -139,6 +139,7 @@ class ExeVersionTests(unittest.TestCase):
         self.addCleanup(app_config.load, force=True)
         self._before = os.environ.get("XLCSV_EXE_VERSION")
         self.addCleanup(self._restore)
+        self.addCleanup(os.environ.pop, "XLCSV_INSIDE_FROM", None)
 
     def _restore(self) -> None:
         if self._before is None:
@@ -208,9 +209,39 @@ class ExeVersionTests(unittest.TestCase):
         self.assertIn("まるごと入れ替えて", note)
         self.assertIn("置き換える", note)
 
+    def test_1つ下の新しい中身で動いているときは移った元を言う(self) -> None:
+        r"""窓(exe)が入れ子の中身を見つけて、そちらで動かしているとき。
+
+        版は揃うので「古いまま」ではありません ── ただし **exe とは別の
+        フォルダの中身**で動いているので、黙っていると分かりません。
+        """
+        os.environ["XLCSV_EXE_VERSION"] = app_config.version()
+        os.environ["XLCSV_INSIDE_FROM"] = r"C:\Desktop\配布\変換器"
+        note = app_config.version_note()
+        self.assertIn("1つ下に入っていた", note)
+        self.assertIn(r"C:\Desktop\配布\変換器", note)
+        self.assertIn("そのままで使えます", note)
+        self.assertIn(r"(exe は C:\Desktop\配布\変換器)", app_config.describe())
+        # 移っていなければ何も言いません(版が揃っているので)
+        os.environ.pop("XLCSV_INSIDE_FROM")
+        self.assertEqual(app_config.version_note(), "")
+
     def test_窓が渡す版はexeの版そのもの(self) -> None:
         """Rust 側が `CARGO_PKG_VERSION` を渡しています。"""
         rust = (Path(__file__).resolve().parent.parent / "src-tauri" / "src"
                 / "bridge.rs").read_text(encoding="utf-8")
         self.assertIn('.env("XLCSV_EXE_VERSION", env!("CARGO_PKG_VERSION"))',
                       rust)
+
+    def test_窓は1つ下の新しい中身を自分で選ぶ(self) -> None:
+        r"""手でフォルダを動かさなくても済むように、窓(Rust)が探します。
+
+        **上げる方向にしか動きません** ── 古い／同じ版／版が読めない
+        フォルダは選びません(わざと脇に置いた古いコピーを巻き込まない)。
+        """
+        main = (Path(__file__).resolve().parent.parent / "src-tauri" / "src"
+                / "main.rs").read_text(encoding="utf-8")
+        self.assertIn("fn newer_inside(", main)
+        self.assertIn("fn version_of(", main)
+        self.assertIn('std::env::set_var("XLCSV_INSIDE_FROM"', main)
+        self.assertIn("if version > best {", main)
