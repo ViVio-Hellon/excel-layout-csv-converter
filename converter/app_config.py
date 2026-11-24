@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -162,6 +163,48 @@ def exe_version() -> str:
     return os.environ.get("XLCSV_EXE_VERSION", "").strip()
 
 
+def config_stamp() -> str:
+    """`config/app.json` をいつ置いたか(`2026-11-09 14:03`)。空なら読めず。"""
+    try:
+        when = datetime.fromtimestamp(CONFIG_PATH.stat().st_mtime)
+    except OSError:
+        return ""
+    return when.strftime("%Y-%m-%d %H:%M")
+
+
+#: 中を覗くフォルダの数の上限(**深くは潜りません** ── 直下だけ)
+_LOOK_INSIDE = 40
+
+
+def newer_inside() -> tuple[Path, str] | None:
+    r"""**この下に、別の版の中身が入ったフォルダが無いか。**
+
+    Windows の「すべて展開」は、既にあるフォルダへ展開すると
+    `…\excel-layout-csv-converter-main\excel-layout-csv-converter-main\`
+    のように**入れ子**になることがあります。exe は自分と同じ階層の
+    `bridge.py` を使うので、**新しい中身が1つ下に入ったまま、古い中身で
+    動く**ことになります(現場でそうなりました)。
+
+    直下のフォルダだけ `config\app.json` を覗いて、違う版があれば返します。
+    """
+    try:
+        children = sorted(p for p in APP_ROOT.iterdir() if p.is_dir())
+    except OSError:
+        return None
+    for child in children[:_LOOK_INSIDE]:
+        path = child / "config" / "app.json"
+        if not path.is_file():
+            continue
+        try:
+            found = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        text = str(found.get("version") or "").strip()
+        if text and text != version():
+            return child, text
+    return None
+
+
 def version_note() -> str:
     r"""**exe と中身の版が違えば**その知らせ。同じ(かブラウザ版)なら空。
 
@@ -180,11 +223,22 @@ def version_note() -> str:
         return ""
     # 画面の札(title)とログに出ます。**飾り字を入れません** ──
     # そのまま読まれる場所なので、`**` が見えてしまいます
-    return (f"窓(exe)は VER{exe}、中身は VER{version()} です ── "
-            "このフォルダの中身(画面と変換のファイル)が古いままです。"
-            f"{APP_ROOT} を、配られたフォルダ"
+    stamp = config_stamp()
+    when = f"(置いたのは {stamp})" if stamp else ""
+    note = (f"窓(exe)は VER{exe}、中身は VER{version()}{when} です ── "
+            "このフォルダの中身(画面と変換のファイル)が古いままです。")
+    # **入れ子になっていないか見ます。** 「展開し直したのに直らない」の
+    # ほとんどがこれで、中の1つ下に新しい中身が入っています
+    inside = newer_inside()
+    if inside is not None:
+        folder, found = inside
+        return (note + f"新しい中身(VER{found})は、この中の「{folder.name}」に"
+                "入っています ── そのフォルダの中身を1つ上へ移すか、"
+                f"exe をそちらへ入れて使ってください({folder})。")
+    return (note + f"{APP_ROOT} を、配られたフォルダ"
             "(ExcelCsvConverter-windows-<版>)でまるごと入れ替えてください"
-            "(exe だけを入れ替えても中身は新しくなりません)。")
+            "(exe だけを入れ替えても中身は新しくなりません)。"
+            "展開のときは「ファイルを置き換える」を選んでください。")
 
 
 def version_problem() -> str:

@@ -164,6 +164,50 @@ class ExeVersionTests(unittest.TestCase):
         # 診断情報にも出します
         self.assertIn("窓(exe)", app_config.describe())
 
+    def test_入れ子になっていたら場所まで言う(self) -> None:
+        r"""「展開し直したのに直らない」のほとんどがこれです。
+
+        Windows の「すべて展開」は、既にあるフォルダへ展開すると
+        `…\main\main\` のように**入れ子**になることがあります。exe は
+        自分と同じ階層の `bridge.py` を使うので、新しい中身が1つ下に
+        入ったまま、古い中身で動きます。
+        """
+        import json
+        import tempfile
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, root, True)
+        (root / "config").mkdir()
+        (root / "config" / "app.json").write_text(
+            json.dumps({"version": "1.12.0"}), encoding="utf-8")
+        nest = root / "excel-layout-csv-converter-main" / "config"
+        nest.mkdir(parents=True)
+        (nest / "app.json").write_text(json.dumps({"version": "1.15.1"}),
+                                       encoding="utf-8")
+
+        before = (app_config.APP_ROOT, app_config.CONFIG_PATH)
+        app_config.APP_ROOT = root
+        app_config.CONFIG_PATH = root / "config" / "app.json"
+        self.addCleanup(lambda: setattr(app_config, "APP_ROOT", before[0]))
+        self.addCleanup(lambda: setattr(app_config, "CONFIG_PATH", before[1]))
+        app_config.load(force=True)
+        os.environ["XLCSV_EXE_VERSION"] = "1.15.1"
+
+        found = app_config.newer_inside()
+        self.assertIsNotNone(found)
+        self.assertEqual(found[1], "1.15.1")
+        note = app_config.version_note()
+        self.assertIn("excel-layout-csv-converter-main", note)
+        self.assertIn("1つ上へ移す", note)
+        # 置いた日も出します(古いままだと目で分かるように)
+        self.assertIn("置いたのは", note)
+
+    def test_入れ子が無ければフォルダごと入れ替えてと言う(self) -> None:
+        os.environ["XLCSV_EXE_VERSION"] = "9.9.9"
+        note = app_config.version_note()
+        self.assertIn("まるごと入れ替えて", note)
+        self.assertIn("置き換える", note)
+
     def test_窓が渡す版はexeの版そのもの(self) -> None:
         """Rust 側が `CARGO_PKG_VERSION` を渡しています。"""
         rust = (Path(__file__).resolve().parent.parent / "src-tauri" / "src"
