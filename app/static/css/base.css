@@ -27,6 +27,8 @@ button.primary {
 }
 button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.08); }
 button.big { padding: 10px 26px; font-size: 15px; }
+/* 表の中の押しもの(ロットを探すの「日報を見る」)。**行の高さを変えない** */
+button.small { padding: 3px 10px; font-size: 12px; white-space: nowrap; }
 button.danger { border-color: var(--bad); color: var(--bad); }
 button.ghost { color: var(--dim); }
 button.link {

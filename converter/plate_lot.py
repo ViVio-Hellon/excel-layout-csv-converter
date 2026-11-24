@@ -142,6 +142,10 @@ class Result:
     columns: list[str] = field(default_factory=list)
     numeric: list[bool] = field(default_factory=list)
     rows: list[list[str]] = field(default_factory=list)
+    #: 行ごとの鍵(`日付` `ライン` `直` `ページ`)。**画面の「日報を見る」が
+    #: 使います** ── その行のあるページの紙(印刷用HTML)を開くため。
+    #: 表の列には出しません(CSVにも出しません)
+    keys: list[dict[str, str]] = field(default_factory=list)
     total: int = 0
     shown: int = 0
     summary: str = ""
@@ -153,7 +157,7 @@ class Result:
     files: int = 0
 
     def as_dict(self) -> dict:
-        return {"lot": self.lot, "columns": self.columns,
+        return {"lot": self.lot, "columns": self.columns, "keys": self.keys,
                 "numeric": self.numeric, "rows": self.rows,
                 "total": self.total, "shown": self.shown,
                 "summary": self.summary, "warnings": self.warnings,
@@ -265,6 +269,9 @@ def search(base: Path, lines: list[str], start: date, end: date,
     result.columns = [label for _, label, _ in COLUMNS]
     result.numeric = [numeric for _, _, numeric in COLUMNS]
     result.rows = [[_cell(one, key, label) for key, label, _ in COLUMNS]
+                   for one in shown]
+    result.keys = [{"date": one.date, "line": one.line, "shift": one.shift,
+                    "page": (one.row.get("ページ") or "").strip()}
                    for one in shown]
     result.total = len(found)
     result.shown = len(shown)

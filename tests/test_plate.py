@@ -894,6 +894,89 @@ class LotRouteTests(WebCase):
         self.assertIn("板データ参照パス", data["detail"])
 
 
+class OpenPaperTests(WebCase):
+    r"""「日報を見る」── 当たった行から、その直のページの紙を開く
+
+    日報管理ツールの「紙を見る」と同じ役目です。あちらは日報データから
+    紙を組み立てますが、**こちらは参照パスに既に書き出されている紙を
+    開くだけ**です(このツールは読むだけで、何も作りません)。
+
+    開くのはこの端末の既定のブラウザ(`os.startfile` の道)なので、
+    試験では**開く道だけ差し替えて**、どの道が渡ったかを見ます。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.tmp / "板"
+        self.base.mkdir()
+        write_day(self.base, "L-1", "2026-11-07",
+                  lots=[("1直", 2, 1, "N7131T0")])
+        folder = self.base / "L-1" / "印刷" / "2026.11" / "7"
+        folder.mkdir(parents=True)
+        self.paper = folder / "印刷_2026年11月7日_L-1_1直_2.html"
+        self.paper.write_text(SAMPLE, encoding="utf-8")
+        user_settings.save({"plate_dir": str(self.base),
+                            "output_dir": str(self.tmp / "出力")})
+        self.opened: list[str] = []
+        import subprocess
+        real = subprocess.Popen
+        self.addCleanup(setattr, subprocess, "Popen", real)
+        subprocess.Popen = lambda args, *a, **k: self.opened.append(args[-1])
+
+    def open(self, body: dict):
+        full = {"date": "2026-11-07", "line": "L-1", "shift": "1直", "page": "2"}
+        full.update(body)
+        return self.request("POST", "/api/plate/paper", full,
+                            screen_id=self.claim())
+
+    def test_探した行の鍵がついてくる(self) -> None:
+        """画面はこの鍵で「日報を見る」を押します(**列には出しません**)。"""
+        status, data = self.request(
+            "POST", "/api/plate/lots",
+            {"start": "2026-11-01", "end": "2026-11-30", "line": "*",
+             "lot": "N71"}, screen_id=self.claim())
+        self.assertEqual(status, 200)
+        self.assertEqual(data["keys"][0], {"date": "2026-11-07", "line": "L-1",
+                                           "shift": "1直", "page": "2"})
+        self.assertNotIn("日報", data["columns"])   # CSVには出しません
+
+    def test_その直の紙を開く(self) -> None:
+        status, data = self.open({})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["name"], self.paper.name)
+        self.assertEqual(self.opened, [str(self.paper)])
+
+    def test_日のフォルダが0詰めでも開く(self) -> None:
+        """`7` とも `07` とも書かれ得ます(書き手で違います)。"""
+        import shutil
+        shutil.move(str(self.base / "L-1" / "印刷" / "2026.11" / "7"),
+                    str(self.base / "L-1" / "印刷" / "2026.11" / "07"))
+        status, _data = self.open({})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.opened), 1)
+
+    def test_紙が無ければどこを見たか言う(self) -> None:
+        status, data = self.open({"page": "9"})
+        self.assertEqual(status, 404)
+        self.assertIn("日報(印刷用HTML)がありません", data["reason"])
+        self.assertIn("印刷", data["detail"])
+        self.assertEqual(self.opened, [])
+
+    def test_参照パスの外は開かない(self) -> None:
+        """ラインは**一覧にある名前だけ**。`..\..` のような字は断ります。"""
+        for name in ("よそ", r"..\..\Windows"):
+            status, data = self.open({"line": name})
+            self.assertEqual(status, 400)
+            self.assertIn("そのラインはありません", data["reason"])
+        self.assertEqual(self.opened, [])
+
+    def test_直とページが空なら断る(self) -> None:
+        status, data = self.open({"shift": ""})
+        self.assertEqual(status, 400)
+        self.assertIn("直とページが要ります", data["reason"])
+
+
 class PaperTests(WebCase):
     r"""集計に入っていないページを、紙(印刷用HTML)から拾う
 

@@ -280,3 +280,38 @@ def pages(base: Path, line: str, start: date, end: date) -> list[tuple]:
                 out.append((plate_source.date_text(day), found.group("line"),
                             found.group("shift"), found.group("page"), path))
     return out
+
+
+def find_page(base: Path, line: str, day: date, shift: str,
+              page: str) -> Path | None:
+    r"""その直のそのページの紙(印刷用HTML)を1つ。無ければ `None`。
+
+    画面の「日報を見る」が開くものです ── 日報管理ツールの「紙を見る」と
+    同じ考えで、**その行のあるページの紙**を出します。あちらは日報データ
+    から紙を組み立てますが、こちらは**既に書き出されている紙を開くだけ**
+    です(このツールは参照パスを読むだけで、何も作りません)。
+
+    日の名前は `17` とも `7` とも書かれ得るので、日のフォルダを開いて
+    ファイル名で突き合わせます(ラインに `_` が入っていても `FILE_NAME`
+    が真ん中を欲張って取るので外しません)。
+    """
+    want = str(page or "").strip().lstrip("0") or "0"
+    folder = base / line / KIND_PRINT / f"{day.year:04d}.{day.month:02d}"
+    for name in (str(day.day), f"{day.day:02d}"):
+        here = folder / name
+        if not here.is_dir():
+            continue
+        try:
+            files = sorted(p for p in here.iterdir()
+                           if p.is_file() and p.suffix.lower() == ".html")
+        except OSError:
+            return None
+        for path in files:
+            found = FILE_NAME.match(path.name)
+            if not found:
+                continue
+            if found.group("shift") != shift:
+                continue
+            if (found.group("page").lstrip("0") or "0") == want:
+                return path
+    return None

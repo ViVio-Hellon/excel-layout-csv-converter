@@ -18,8 +18,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
 
-from converter import (plate_graph, plate_lot, plate_out, plate_source,
-                       report_db, user_settings)
+from converter import (plate_graph, plate_lot, plate_out, plate_paper,
+                       plate_source, report_db, user_settings)
 from converter.logging_utils import get_logger
 
 from . import Blueprint, Request, Response, json_response, refuse
@@ -279,3 +279,65 @@ def lots_export(request: Request) -> Response:
     return json_response({"ok": True, **result.as_dict(), "written": written,
                           "message": f"{written['name']} を書きました"
                                      f"({written['rows']} 行)"})
+
+
+@bp.post("/api/plate/paper")
+def paper(request: Request) -> Response:
+    r"""「日報を見る」── その行のあるページの紙(印刷用HTML)を別の窓で開く。
+
+    日報管理ツールの「紙を見る」と同じ役目です。あちらは日報データから
+    紙を組み立てますが、**こちらは既に書き出されている紙を開くだけ**
+    です ── このツールは参照パスを読むだけで、何も作りません。
+
+    【ダウンロードはしません】
+    中身を画面へ送らず、**この端末の既定のブラウザにファイルを開かせます**
+    (出力先を開くのと同じ `os.startfile` の道)。共有に置かれた紙を
+    そのまま見るので、どこにも写しが残りません。
+
+    【開けるのは参照パスの中だけ】
+    ラインは一覧にある名前しか受けず、道は `plate_paper.find_page` が
+    参照パスの下から組み立てます ── 画面から来た字がそのまま道になる
+    ことはありません。
+    """
+    import os
+    import subprocess
+    import sys
+
+    base, problem = _base()
+    if base is None:
+        return refuse("板データを読めません", problem, status=400)
+    body = request.json()
+    line = str(body.get("line") or "").strip()
+    real = {one.name for one in plate_source.lines(base)}
+    if line not in real:
+        return refuse("そのラインはありません",
+                      f"{line} ── 探し直してください", status=400)
+    day = plate_source.parse_date(str(body.get("date") or ""))
+    if day is None:
+        return refuse("日付が読めません", str(body.get("date") or ""), status=400)
+    shift = str(body.get("shift") or "").strip()
+    page = str(body.get("page") or "").strip()
+    if not shift or not page:
+        return refuse("直とページが要ります",
+                      f"直={shift or '(空)'} ページ={page or '(空)'}", status=400)
+
+    path = plate_paper.find_page(base, line, day, shift, page)
+    if path is None:
+        return refuse(
+            "その直の日報(印刷用HTML)がありません",
+            f"{plate_source.date_text(day)} {line} {shift} {page}ページ ── "
+            f"{base / line / plate_paper.KIND_PRINT} に書き出されていない"
+            "ようです(日報管理ツールの印刷で残ります)", status=404)
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(path))               # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except Exception as exc:                      # noqa: BLE001
+        log.warning("日報を開けませんでした: %s (%s)", path, exc)
+        return refuse("開けませんでした", str(exc), status=500)
+    log.info("日報を開きました: %s", path)
+    return json_response({"ok": True, "path": str(path), "name": path.name,
+                          "message": f"{path.name} を開きました"})

@@ -129,6 +129,16 @@ class LotSearchScreenTests(unittest.TestCase):
         js = (JS_DIR / "views" / "plate.js").read_text(encoding="utf-8")
         self.assertIn("paintShared", js)
 
+    def test_当たった行から日報を見られる(self) -> None:
+        """日報管理ツールの「紙を見る」に当たるもの(言葉は「日報を見る」)。"""
+        js = (JS_DIR / "views" / "plate.js").read_text(encoding="utf-8")
+        self.assertIn('"/api/plate/paper"', js)
+        self.assertIn('look.textContent = "日報を見る";', js)
+        # 列ではなくボタンなので、**CSVには出ません**
+        from converter import plate_lot
+        self.assertNotIn("日報", [label for _key, label, _n in plate_lot.COLUMNS])
+        self.assertIn("日報を見る", HTML)
+
     def test_板集計タブの中にある(self) -> None:
         panel = HTML.index('id="panel-plate"')
         after = HTML.index('id="panel-settings"')

@@ -241,6 +241,25 @@ function lotAsk() {
   };
 }
 
+/**
+ * 「日報を見る」── その行のあるページの紙(印刷用HTML)を別の窓で開きます。
+ *
+ * **中身は画面へ持ってきません**(ダウンロードもしません)。参照パスに
+ * 書き出されている紙を、この端末の既定のブラウザに開かせるだけです
+ * ── 日報管理ツールの「紙を見る」と同じ役目です。
+ */
+function openPaper(key, button) {
+  button.disabled = true;
+  api("/api/plate/paper", { json: key }).then((result) => {
+    button.disabled = false;
+    if (!result.ok) { return toast.bad("lot-msg", reason(result)); }
+    toast.ok("lot-msg", result.data.message);
+  }).catch(() => {
+    button.disabled = false;
+    toast.bad("lot-msg", "開けませんでした");
+  });
+}
+
 function paintLots(data) {
   const head = $("lot-head");
   const body = $("lot-body");
@@ -252,7 +271,11 @@ function paintLots(data) {
     if ((data.numeric || [])[i]) { cell.className = "num"; }
     head.append(cell);
   });
-  (data.rows || []).forEach((row) => {
+  // 当たった行から1押しで紙へ(**列には出さないので、CSVには出ません**)
+  const last = document.createElement("th");
+  last.textContent = "日報";
+  head.append(last);
+  (data.rows || []).forEach((row, at) => {
     const line = document.createElement("tr");
     row.forEach((value, i) => {
       const cell = document.createElement("td");
@@ -260,6 +283,19 @@ function paintLots(data) {
       if ((data.numeric || [])[i]) { cell.className = "num"; }
       line.append(cell);
     });
+    const actions = document.createElement("td");
+    const key = (data.keys || [])[at];
+    if (key && key.page) {
+      const look = document.createElement("button");
+      look.type = "button";
+      look.className = "small";
+      look.textContent = "日報を見る";
+      look.title = `${key.date} ${key.line} ${key.shift} ${key.page}ページの`
+        + "日報(印刷用HTML)を別の窓で開きます";
+      look.addEventListener("click", () => openPaper(key, look));
+      actions.append(look);
+    }
+    line.append(actions);
     body.append(line);
   });
   $("lot-summary").textContent = data.summary || "";
