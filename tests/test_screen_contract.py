@@ -123,6 +123,12 @@ class LotSearchScreenTests(unittest.TestCase):
             at = HTML.index(f">{label}<")
             self.assertIn("必須", HTML[at:at + 60], label)
 
+    def test_共有の日報データの様子を探す前に出す(self) -> None:
+        """「設定したのに読めていない」を、探してから気づくのでは遅いので。"""
+        self.assertIn('id="plate-shared"', HTML)
+        js = (JS_DIR / "views" / "plate.js").read_text(encoding="utf-8")
+        self.assertIn("paintShared", js)
+
     def test_板集計タブの中にある(self) -> None:
         panel = HTML.index('id="panel-plate"')
         after = HTML.index('id="panel-settings"')

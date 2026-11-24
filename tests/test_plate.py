@@ -1183,3 +1183,56 @@ class ReportDbTests(WebCase):
         self.addCleanup(setattr, report_db, "CAP", original)
         got = self.find("N713")
         self.assertTrue(any("超えた" in one for one in got.warnings))
+
+
+class SharedPathTests(WebCase):
+    r"""共有の道(UNC)の開き方 ── **現場で開けなかったところ**
+
+        共有の日報データ(日報データ.sqlite3)を読めなかったので、
+        集計明細CSVと紙で探しました
+
+    `\\サーバ\共有\日報データ.sqlite3` をそのまま `file://サーバ/…` に
+    すると、sqlite3 は `サーバ` を**URI の宛先**と読み
+    `invalid uri authority` で開けません。斜線を4本にして、宛先を空に
+    します。
+    """
+
+    def test_共有の道は斜線4本にする(self) -> None:
+        from converter import report_db
+        uri = report_db.uri_of(Path(r"\\nlmfangyshrd\各課共有\日報データ.sqlite3"))
+        self.assertTrue(uri.startswith("file:////nlmfangyshrd/"), uri)
+        self.assertTrue(uri.endswith("?mode=ro"))
+        # **宛先を持たせません**(ここが `invalid uri authority` の元)
+        self.assertNotIn("file://nlmfangyshrd", uri)
+
+    def test_ドライブの道はそのまま(self) -> None:
+        from converter import report_db
+        uri = report_db.uri_of(Path(r"C:\共有\日報データ.sqlite3"))
+        self.assertTrue(uri.startswith("file:C:/"), uri)
+
+    def test_記号と漢字は百分率で書き換える(self) -> None:
+        """道に `?` があると、そこから先が「開き方の指定」と読まれます。"""
+        from converter import report_db
+        uri = report_db.uri_of(Path("/tmp/a b?c/日報.sqlite3"))
+        self.assertIn("a%20b%3Fc", uri)
+        self.assertNotIn("日報", uri)
+
+    def test_漢字や空白の入った道でも本当に開ける(self) -> None:
+        import sqlite3
+
+        from converter import report_db
+        folder = self.tmp / "各課共有 の中"
+        folder.mkdir()
+        path = folder / "日報データ.sqlite3"
+        sqlite3.connect(path).close()
+        conn = sqlite3.connect(report_db.uri_of(path), uri=True)
+        self.addCleanup(conn.close)
+        self.assertEqual(conn.execute("SELECT 1").fetchone()[0], 1)
+
+    def test_読めなかった理由は元の言葉まで出す(self) -> None:
+        """「読めなかった」だけでは、道が違うのか形が違うのか分かりません。"""
+        from converter import report_db
+        read = report_db.Readout(status=report_db.ERROR,
+                                 path=Path("/x/日報データ.sqlite3"),
+                                 detail="invalid uri authority: サーバ")
+        self.assertIn("invalid uri authority", read.reason())

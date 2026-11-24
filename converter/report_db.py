@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Callable
+from urllib.parse import quote
 
 from . import plate_source
 from .logging_utils import get_logger
@@ -172,7 +173,10 @@ class Readout:
         if self.status == TIMEOUT:
             return f"共有の日報データを読むのに {self.seconds:g}秒を超えたので"
         if self.status == ERROR:
-            return f"共有の日報データ({name})を読めなかったので"
+            # **元の言葉まで出します** ── 「読めなかった」だけでは、
+            # 道が違うのか、形が違うのかが分かりません
+            why = f"({self.detail})" if self.detail else ""
+            return f"共有の日報データ({name})を読めなかったので{why}"
         return ""
 
 
@@ -200,9 +204,31 @@ def _within(seconds: float, work: Callable[[float], None]) -> None:
         raise box["error"]
 
 
+def uri_of(path: Path) -> str:
+    r"""読むだけで開くための `file:` の道。
+
+    **共有(UNC)の道が肝です。** `\\サーバ\共有\日報データ.sqlite3` を
+    そのまま `file://サーバ/共有/…` にすると、sqlite3 は `サーバ` を
+    **URI の宛先(authority)**と読み、
+
+        OperationalError: invalid uri authority: サーバ
+
+    で開けません(現場で出ました)。宛先を空にして道だけを渡すために、
+    **斜線を4本**にします ── `file:////サーバ/共有/…`。
+
+    記号(`?` `#` 空白)と漢字は百分率で書き換えます。`?` から後ろは
+    sqlite3 が「開き方の指定」と読むので、道に `?` が入っていると
+    そこで切れます。
+    """
+    text = str(path).replace("\\", "/")
+    if text.startswith("//"):                     # 共有(UNC)
+        return "file:////" + quote(text.lstrip("/"), safe="/") + "?mode=ro"
+    return "file:" + quote(text, safe="/:") + "?mode=ro"
+
+
 def _open(path: Path, deadline: float) -> sqlite3.Connection:
     """**読むだけ**で開く(`?mode=ro`)。期限を過ぎたら問い合わせを止めます。"""
-    conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True,
+    conn = sqlite3.connect(uri_of(path), uri=True,
                            timeout=max(0.5, deadline - time.monotonic()))
     conn.row_factory = sqlite3.Row
     conn.set_progress_handler(
@@ -293,14 +319,20 @@ def _read(path: Path, seconds: float,
     return out
 
 
-def state(path: Path) -> Readout:
-    """開けるかどうかと、置いてあるラインだけ見る(設定タブの札に出します)。"""
+#: 「開けるか」を見るときの待ち時間。**探すときより短く** ── 画面を
+#: 出すたびに待つところなので、届かない共有で毎回8秒止まると使えません
+PEEK_SECONDS = 3.0
+
+
+def state(path: Path, *, seconds: float | None = None) -> Readout:
+    """開けるかどうかと、置いてあるラインだけ見る(画面の札に出します)。"""
     out = Readout(path=Path(path))
 
     def work(conn: sqlite3.Connection) -> None:
         out.lines = sorted(tables(conn))
 
-    return _read(Path(path), SECONDS, work, out)
+    return _read(Path(path), PEEK_SECONDS if seconds is None else seconds,
+                 work, out)
 
 
 def lot_rows(path: Path, lines: list[str], start: date, end: date,

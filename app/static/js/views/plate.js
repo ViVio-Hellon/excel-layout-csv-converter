@@ -64,6 +64,29 @@ function paintLines(data) {
   }
 }
 
+/**
+ * 共有の日報データの様子。**探す前に分かるように**出します ──
+ * 「設定したのに読めていない」を、探してから気づくのでは遅いので。
+ */
+function paintShared(shared) {
+  const box = $("plate-shared");
+  if (!box) { return; }
+  if (!shared) {
+    box.textContent = "(未設定 ── 集計明細CSVと紙で探します)";
+    box.className = "hint";
+    return;
+  }
+  if (shared.ok) {
+    const lines = (shared.lines || []).join("・") || "(表がありません)";
+    box.textContent = `読めます ── ${shared.path}(ライン: ${lines})`;
+    box.className = "hint ok";
+    return;
+  }
+  // 理由はサーバの言葉をそのまま(「〜ので」まで来ます)
+  box.textContent = (shared.reason || "読めません") + " " + shared.path;
+  box.className = "hint bad";
+}
+
 /** ラインの選び(ロットを探す)。**「全ライン」も選べます。** */
 function paintLotLines(data) {
   const box = document.getElementById("lot-line");
@@ -106,6 +129,7 @@ export function load() {
       $("lot-end").value = data.span.end;
     }
     paintLotLines(data);
+    paintShared(data.shared);
     $("plate-max").textContent = data.max_days;
   });
 }
