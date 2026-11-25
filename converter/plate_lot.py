@@ -185,7 +185,8 @@ def _sort_key(found: Found) -> tuple:
     """作業日 → ライン → 直 → ページ → 行(紙をめくる順)。"""
     def number(name: str) -> float:
         return plate_source.number(found.row.get(name))
-    return (found.date, found.line, plate_graph.shift_sort_key(found.shift),
+    return (plate_source.sort_date(found.date), found.line,
+            plate_graph.shift_sort_key(found.shift),
             number("ページ"), number("行"))
 
 

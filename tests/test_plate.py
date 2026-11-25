@@ -894,6 +894,47 @@ class LotRouteTests(WebCase):
         self.assertIn("板データ参照パス", data["detail"])
 
 
+class DateOrderTests(WebCase):
+    r"""日付の列は**日付として**並べる
+
+        2026年11月10日 2026年11月12日 … 2026年11月4日 2026年11月6日
+
+    グラフの横軸がこの順に出ました。字の順だと `1日` が `19日` の
+    後ろへ行くからです(`1日` の `日` が `19日` の `9` より後ろの字)。
+    集計の日付は書き手によって `2026-11-07` だったり `2026年11月7日`
+    だったりするので、**読めてから並べます**。
+    """
+
+    def test_年月日も日付として読める(self) -> None:
+        for text in ("2026-11-07", "2026/11/07", "2026.11.7", "2026年11月7日"):
+            self.assertEqual(plate_source.parse_date(text),
+                             datetime.date(2026, 11, 7),
+                             text)
+
+    def test_字の順ではなく日付の順(self) -> None:
+        days = ["2026年11月19日", "2026年11月1日", "2026年11月20日",
+                "2026年11月2日", "2026年12月1日"]
+        self.assertEqual(sorted(days, key=plate_source.sort_date),
+                         ["2026年11月1日", "2026年11月2日", "2026年11月19日",
+                          "2026年11月20日", "2026年12月1日"])
+
+    def test_読めない字は後ろへ回すが捨てない(self) -> None:
+        days = ["こわれ", "2026年11月2日", ""]
+        self.assertEqual(sorted(days, key=plate_source.sort_date),
+                         ["2026年11月2日", "", "こわれ"])
+
+    def test_グラフの横軸が日付の順になる(self) -> None:
+        rows = []
+        for day in (1, 2, 19, 20):
+            rows.append(plate_graph.ShiftRow(
+                date=f"2026年11月{day}日", line="L-1", shift="1直",
+                sheets=10, weight=1.0, stop=60, rate=95.0, productivity=3.0))
+        tiles = plate_graph.trend_tiles(rows, ["L-1"])
+        self.assertEqual(tiles[0].labels,
+                         ["2026年11月1日", "2026年11月2日", "2026年11月19日",
+                          "2026年11月20日"])
+
+
 class OpenPaperTests(WebCase):
     r"""「日報を見る」── 当たった行から、その直のページの紙を開く
 

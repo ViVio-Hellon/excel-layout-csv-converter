@@ -3,7 +3,7 @@
 # 詳しくは docs/デスクトップ版.md
 [package]
 name = "excel-csv-converter-desktop"
-version = "1.15.4"
+version = "1.15.5"
 edition = "2021"
 publish = false
 

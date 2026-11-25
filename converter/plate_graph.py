@@ -247,7 +247,7 @@ def trend_tiles(rows: list[ShiftRow], lines: list[str]) -> list[Tile]:
     すると、目を往復させることになります。
     """
     days = _by_date(rows)
-    labels = sorted(days)
+    labels = sorted(days, key=plate_source.sort_date)
     if not labels:
         return []
 
@@ -299,7 +299,7 @@ def cumulative_tile(rows: list[ShiftRow]) -> Tile:
     棒が床に貼り付いて高さの差が読めません。
     """
     days = _by_date(rows)
-    labels = sorted(days)
+    labels = sorted(days, key=plate_source.sort_date)
     daily = [sum(r.sheets for r in days[d]) for d in labels]
     running: list[float] = []
     total = 0.0
@@ -390,7 +390,7 @@ def day_table_tile(rows: list[ShiftRow]) -> Tile:
     """日別の表。**グラフで見当を付けて、数はここで読みます。**"""
     days = _by_date(rows)
     table: list[list[str]] = []
-    for day in sorted(days):
+    for day in sorted(days, key=plate_source.sort_date):
         same = days[day]
         table.append([
             day, "／".join(sorted({r.line for r in same})),

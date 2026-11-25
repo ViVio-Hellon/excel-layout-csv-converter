@@ -86,21 +86,38 @@ MAX_DAYS = 400
 # 日付の読み方
 # ----------------------------------------------------------------------
 def parse_date(text: str) -> date | None:
-    r"""`2026-11-17` / `2026/11/17` / `2026.11.17` を受けます。
+    r"""`2026-11-17` / `2026/11/17` / `2026.11.17` / `2026年11月17日` を受けます。
 
     CSVの中の「日付」列は書き手によって区切りが違います(VBA から
-    引き継いだものは `.`)。**読めない1行で日が飛ぶ**より受けます。
+    引き継いだものは `.`、日報管理ツールの集計は `年月日`)。
+    **読めない1行で日が飛ぶ**より受けます。
     """
     trimmed = (text or "").strip()
     if not trimmed:
         return None
-    parts = re.split(r"[-/.]", trimmed)
+    parts = re.split(r"[-/.年月]", trimmed.rstrip("日"))
     if len(parts) != 3:
         return None
     try:
         return date(int(parts[0]), int(parts[1]), int(parts[2]))
     except ValueError:
         return None
+
+
+def sort_date(text: str) -> tuple:
+    r"""日付の列を**日付として**並べるための鍵。
+
+    `2026年11月1日` と `2026年11月19日` を字の順で並べると、`1日` が
+    `19日` の後ろへ行きます(`"2026年11月1日" > "2026年11月19日"` ──
+    `1日` の `日` が `19日` の `9` より後ろの字だからです)。実際に
+    グラフの横軸が **10日 → 19日 → 1日 → 20日** の順になりました。
+
+    読めない字は**いちばん後ろ**に、元の字の順で置きます(捨てません)。
+    """
+    found = parse_date(text)
+    if found is None:
+        return (1, date.max, str(text or ""))
+    return (0, found, "")
 
 
 def date_text(value: date) -> str:
@@ -358,13 +375,15 @@ def collect(base: Path, chosen: list[str], start: date, end: date,
                     row["ライン"] = line
                 result.stops.append(row)
 
-    result.rows.sort(key=lambda row: (row.get("日付", ""), row.get("ライン", ""),
+    result.rows.sort(key=lambda row: (sort_date(row.get("日付", "")),
+                                      row.get("ライン", ""),
                                       row.get("直", "")))
-    result.stops.sort(key=lambda row: (row.get("日付", ""), row.get("ライン", ""),
+    result.stops.sort(key=lambda row: (sort_date(row.get("日付", "")),
+                                       row.get("ライン", ""),
                                        row.get("直", "")))
     result.columns = _order_columns(AGGREGATE_COLUMNS, seen_cols)
     result.stop_columns = _order_columns(STOP_COLUMNS, seen_stop_cols)
-    result.dates = sorted(dates)
+    result.dates = sorted(dates, key=sort_date)
     result.lines = used_lines
     log.info("板集計: ライン=%s 期間=%s〜%s 日数=%d 行=%d 停止=%d 読めず=%d",
              "／".join(chosen) or "(なし)", date_text(start), date_text(end),

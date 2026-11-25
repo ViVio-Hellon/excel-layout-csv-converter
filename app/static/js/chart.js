@@ -36,15 +36,63 @@ function markOf(one) {
   return one && one.mark ? "mark-" + one.mark : "";
 }
 
-/** 横軸のラベル。**多いときは間引く** ── 重なって読めないほうが困る。 */
+/** 横軸の字の大きさ(`components.css` の `.chart .label` と合わせます)。 */
+const LABEL_FONT = 10;
+
+/**
+ * 日付は**月/日**だけにします(`2026年11月10日` → `11/10`)。
+ *
+ * 元の字は参照CSVの「日付」列そのままで、書き手によって
+ * `2026年11月10日` だったり `2026-11-10` だったりします。年は横軸の
+ * どこでも同じなので、**落としても迷いません**(期間は画面に出ています)。
+ */
+function shortLabel(text) {
+  const raw = String(text ?? "").trim();
+  let found = raw.match(/^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$/);
+  if (found) { return `${Number(found[2])}/${Number(found[3])}`; }
+  found = raw.match(/^(\d{1,2})[-/.月](\d{1,2})日?$/);
+  if (found) { return `${Number(found[1])}/${Number(found[2])}`; }
+  return raw;
+}
+
+/** だいたいの字幅(全角は1文字ぶん、半角は半分強)。**測るために描きません。** */
+function labelWidth(text) {
+  let units = 0;
+  for (const ch of String(text)) {
+    units += /[\u0020-\u007e\uff61-\uff9f]/.test(ch) ? 0.56 : 1;
+  }
+  return units * LABEL_FONT;
+}
+
+/**
+ * 横軸のラベル。**つぶれないことを先に決めます。**
+ *
+ * ひと月ぶん出すと `2026年11月10日` が12個並び、重なって読めません
+ * (現場で出ました)。順に逃がします。
+ *
+ *     1. 月/日 だけにする
+ *     2. 入らなければ**斜め**(-40°)にする ── 斜めなら必要な間隔は
+ *        字の高さぶんで済むので、間引かずに全部の日を出せます
+ *     3. 斜めでも入らないほど日が多ければ、そこで初めて**間引く**
+ *
+ * 間引きは最後です ── 日が飛んだ軸は「その日のデータが無い」と
+ * 読み違えられます。
+ */
 function paintLabels(svg, labels, step, width, height) {
-  const every = Math.ceil(labels.length / 12) || 1;
-  labels.forEach((text, i) => {
+  const shown = labels.map(shortLabel);
+  const widest = Math.max(1, ...shown.map(labelWidth));
+  const flat = Math.ceil((widest + 6) / step);      // まっすぐ並べるなら何個おきか
+  const slant = Math.ceil((LABEL_FONT + 3) / step); // 斜めなら何個おきか
+  const rotate = flat > 1 && slant < flat;
+  const every = Math.max(1, rotate ? slant : flat);
+  shown.forEach((text, i) => {
     if (i % every !== 0) { return; }
-    svg.appendChild(el("text", {
-      class: "label", x: PAD.left + step * (i + 0.5), y: height - 12,
-      "text-anchor": "middle",
-    }, String(text).replace(/^\d{4}-/, "")));
+    const x = PAD.left + step * (i + 0.5);
+    const y = height - (rotate ? 8 : 12);
+    const attrs = { class: "label", x, y,
+                    "text-anchor": rotate ? "end" : "middle" };
+    if (rotate) { attrs.transform = `rotate(-40 ${x} ${y})`; }
+    svg.appendChild(el("text", attrs, text));
   });
 }
 

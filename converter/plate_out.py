@@ -171,7 +171,9 @@ def _daily_sheet(collected: plate_source.Collected,
 
     running: dict[str, list[float]] = {}
     body: list[list[object]] = []
-    for (day, line) in sorted(groups):
+    # **日付として**並べます(字の順だと 11月1日 が 11月19日 の後ろへ)
+    for (day, line) in sorted(groups, key=lambda key: (
+            plate_source.sort_date(key[0]), key[1])):
         same = groups[(day, line)]
         total_sheets = sum(r.sheets for r in same)
         total_weight = sum(r.weight for r in same)
