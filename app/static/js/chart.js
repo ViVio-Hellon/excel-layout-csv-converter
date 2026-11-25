@@ -64,49 +64,71 @@ function labelWidth(text) {
   return units * LABEL_FONT;
 }
 
+/** 斜めにする角度(度)。**見た目と、要る高さの両方がこれで決まります。** */
+const SLANT = 40;
+
 /**
- * 横軸のラベル。**つぶれないことを先に決めます。**
+ * 横軸をどう出すか**先に決めます**(描く前に)。
  *
- * ひと月ぶん出すと `2026年11月10日` が12個並び、重なって読めません
- * (現場で出ました)。順に逃がします。
+ * ひと月ぶん出すと `2026年11月10日` が12個並び、重なって読めません。
+ * 順に逃がします。
  *
  *     1. 月/日 だけにする
- *     2. 入らなければ**斜め**(-40°)にする ── 斜めなら必要な間隔は
- *        字の高さぶんで済むので、間引かずに全部の日を出せます
+ *     2. 入らなければ**斜め**にする ── 斜めなら必要な間隔は字の高さ
+ *        ぶんで済むので、間引かずに全部の日を出せます
  *     3. 斜めでも入らないほど日が多ければ、そこで初めて**間引く**
  *
  * 間引きは最後です ── 日が飛んだ軸は「その日のデータが無い」と
  * 読み違えられます。
+ *
+ * **`extra` が要ります。** 斜めにした字は軸の下へ left-down に伸びるので、
+ * そのぶん器(viewBox)を縦に伸ばさないと**下が切れます**(切れました)。
+ * ここで要る高さを返し、呼ぶ側が器を伸ばします。
  */
-function paintLabels(svg, labels, step, width, height) {
-  const shown = labels.map(shortLabel);
+function labelPlan(labels, plotW) {
+  const shown = (labels || []).map(shortLabel);
+  const step = shown.length ? plotW / shown.length : plotW;
   const widest = Math.max(1, ...shown.map(labelWidth));
   const flat = Math.ceil((widest + 6) / step);      // まっすぐ並べるなら何個おきか
   const slant = Math.ceil((LABEL_FONT + 3) / step); // 斜めなら何個おきか
   const rotate = flat > 1 && slant < flat;
   const every = Math.max(1, rotate ? slant : flat);
-  shown.forEach((text, i) => {
-    if (i % every !== 0) { return; }
+  // 斜めの字が軸の下に要する高さ(+ 下の余白)
+  const drop = rotate
+    ? widest * Math.sin((SLANT * Math.PI) / 180) + LABEL_FONT * 0.4
+    : LABEL_FONT;
+  const need = 12 + Math.ceil(drop) + 4;            // 軸から下に要るぶん
+  return { shown, every, rotate, extra: Math.max(0, need - PAD.bottom) };
+}
+
+/** 横軸のラベルを置く(**どう出すかは `labelPlan` が決めています**)。 */
+function paintLabels(svg, plan, step, axisY) {
+  const y = axisY + 12;
+  plan.shown.forEach((text, i) => {
+    if (i % plan.every !== 0) { return; }
     const x = PAD.left + step * (i + 0.5);
-    const y = height - (rotate ? 8 : 12);
     const attrs = { class: "label", x, y,
-                    "text-anchor": rotate ? "end" : "middle" };
-    if (rotate) { attrs.transform = `rotate(-40 ${x} ${y})`; }
+                    "text-anchor": plan.rotate ? "end" : "middle" };
+    if (plan.rotate) { attrs.transform = `rotate(-${SLANT} ${x} ${y})`; }
     svg.appendChild(el("text", attrs, text));
   });
 }
 
 /** 1枚のグラフ(棒でも折れ線でも同じ骨格)。 */
 function chart(series, labels) {
-  const W = CHART_W, H = CHART_H;
+  const W = CHART_W;
+  const plotW = W - PAD.left - PAD.right;
+  // **先に横軸の出し方を決めます** ── 斜めにするなら器を縦に伸ばします
+  const plan = labelPlan(labels, plotW);
+  const H = CHART_H + plan.extra;
   const svg = el("svg", {
     class: "chart", viewBox: `0 0 ${W} ${H}`, role: "img",
     "aria-label": `${series.title}(${series.unit})`,
   });
   const values = series.values || [];
   const top = ceiling(values);
-  const plotW = W - PAD.left - PAD.right;
-  const plotH = H - PAD.top - PAD.bottom;
+  // 絵の高さは伸ばしません(伸ばしたぶんは**軸の下**の字のため)
+  const plotH = CHART_H - PAD.top - PAD.bottom;
   const y = (v) => PAD.top + plotH - (Math.max(0, v) / top) * plotH;
 
   for (let i = 0; i <= 4; i += 1) {
@@ -149,7 +171,7 @@ function chart(series, labels) {
                                      cx: PAD.left + step * (i + 0.5), cy: y(v) }));
     });
   }
-  paintLabels(svg, labels, step, W, H);
+  paintLabels(svg, plan, step, PAD.top + plotH);
   return svg;
 }
 
@@ -163,9 +185,10 @@ function chart(series, labels) {
 function combo(tile) {
   const labels = tile.labels || [];
   const series = tile.series || [];
-  const W = CHART_W, H = CHART_H;
+  const W = CHART_W;
+  // 器の高さは**横軸の出し方が決まってから**入れます(下の `setAttribute`)
   const svg = el("svg", {
-    class: "chart", viewBox: `0 0 ${W} ${H}`, role: "img",
+    class: "chart", viewBox: `0 0 ${W} ${CHART_H}`, role: "img",
     "aria-label": `${tile.title}(${tile.unit})`,
   });
   const pick = (axis) => series.filter((s) => (s.axis || "left") === axis);
@@ -176,7 +199,10 @@ function combo(tile) {
     ? Math.max(PAD.right, 12 + String(Math.round(right)).length * 7)
     : PAD.right;
   const plotW = W - PAD.left - rightPad;
-  const plotH = H - PAD.top - PAD.bottom;
+  const plotH = CHART_H - PAD.top - PAD.bottom;
+  const plan = labelPlan(labels, plotW);
+  const H = CHART_H + plan.extra;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   const y = (v, axis) => PAD.top + plotH
     - (Math.max(0, v) / ((axis === "right") ? right : left)) * plotH;
 
@@ -231,7 +257,7 @@ function combo(tile) {
                                      cy: y(v, axis) }));
     });
   });
-  paintLabels(svg, labels, step, W, H);
+  paintLabels(svg, plan, step, PAD.top + plotH);
   return svg;
 }
 

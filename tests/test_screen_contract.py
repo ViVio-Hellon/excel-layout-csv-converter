@@ -58,6 +58,36 @@ class IdTests(unittest.TestCase):
             self.assertIn(f".mark-{mark}", css, f"{mark} の色がありません")
 
 
+class AxisTests(unittest.TestCase):
+    r"""横軸の字が**切れない・つぶれない**ための約束(`chart.js`)
+
+    斜めにした字は軸の下へ左下に伸びます。器(viewBox)の高さを変えない
+    ままだと**下が切れます**(切れました ── `11/3` の左下が欠けた形で
+    出ます)。要る高さを `labelPlan` が返し、器を伸ばしてから描きます。
+    """
+
+    def setUp(self) -> None:
+        self.js = (JS_DIR / "chart.js").read_text(encoding="utf-8")
+
+    def test_先に出し方を決めてから器を作る(self) -> None:
+        self.assertIn("function labelPlan(", self.js)
+        # 器の高さは **CHART_H + 足りないぶん**
+        self.assertEqual(self.js.count("CHART_H + plan.extra"), 2,
+                         "2種類のグラフの両方で器を伸ばします")
+        # 絵の高さは伸ばしません(伸びるのは軸の下だけ)
+        self.assertEqual(self.js.count("CHART_H - PAD.top - PAD.bottom"), 2)
+
+    def test_斜めにするのは入らないときだけ(self) -> None:
+        self.assertIn("const rotate = flat > 1 && slant < flat;", self.js)
+        self.assertIn("rotate(-${SLANT}", self.js)
+        # 間引きは最後(日が飛んだ軸は「データが無い」と読み違えられる)
+        self.assertIn("every = Math.max(1, rotate ? slant : flat)", self.js)
+
+    def test_日付は月日だけにする(self) -> None:
+        self.assertIn("function shortLabel(", self.js)
+        self.assertIn("年", self.js)                 # 2026年11月10日 の形も
+
+
 class TabTests(unittest.TestCase):
     def test_タブは4つで設定もその1つ(self) -> None:
         tabs = re.findall(r'data-tab="([a-z]+)"', HTML)

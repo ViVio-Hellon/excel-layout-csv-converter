@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "excel-csv-converter-desktop"
-version = "1.15.5"
+version = "1.15.6"
 dependencies = [
  "serde",
  "serde_json",
